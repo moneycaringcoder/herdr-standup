@@ -1,0 +1,50 @@
+name: Feature request
+description: Suggest something standup should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are welcome. Worth knowing before you write: standup is
+        deliberately narrow. It never writes to a repository, it makes no
+        network calls, and it does not try to summarise what the work *meant* —
+        no pull-request status, no CI results, no generated prose. Suggestions
+        that need one of those are likely to be declined; see the Scope section
+        of CONTRIBUTING.md.
+
+        If you are willing to implement it, say so. "Would you take a PR that
+        does X?" gets a fast answer.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What you were trying to work out from the digest when you wanted this.
+        Concrete situations make for much better features than abstract
+        capabilities.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: >
+        What standup would report differently, and in which output — the
+        terminal report, the Markdown, the JSON, or all three.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including anything that already gets you part of the way there.
+
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Implementation
+      options:
+        - label: I would be willing to implement this

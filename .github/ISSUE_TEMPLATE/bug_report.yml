@@ -1,0 +1,82 @@
+name: Bug report
+description: Something behaves differently than it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Redact paths, branch names
+        and commit subjects freely — a report with `/home/you/repos/app` in it
+        is just as useful as one with your real paths.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >
+        What the digest said, and what you expected instead. If a number is
+        wrong, the git command that gives the right answer is the most useful
+        thing you can include.
+      placeholder: |
+        The digest says herdr-shear was quiet, but `git log --since=midnight`
+        in that checkout shows four commits.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: The situation
+      description: >
+        The window you asked for, and the state of the repositories and
+        workspaces involved: how many workspaces, whether any are linked
+        worktrees, and anything unusual about the repository (a detached HEAD,
+        an unborn branch, a merge in progress, a submodule, a shallow clone,
+        no remote at all).
+    validations:
+      required: true
+
+  - type: textarea
+    id: json
+    attributes:
+      label: Output of `standup --json`
+      description: >
+        This carries everything the plugin actually collected, including the
+        resolved window and any problems it hit, which is usually enough to
+        find the issue on its own. It does not include file contents.
+      render: json
+
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `standup --version`, `herdr --version`, and `git --version`.
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: timezone
+    attributes:
+      label: Time zone
+      description: >
+        Output of `date +%Z%z`. Several of the trickier bugs here are about
+        window boundaries, so this matters more than it looks.
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: If you have a plugin `config.json`, paste it here.
+      render: json
