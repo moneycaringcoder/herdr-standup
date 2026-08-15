@@ -1,0 +1,75 @@
+# herdr plugin: standup
+#
+# A digest of what your agents actually did. One command, one readable summary
+# of every workspace over a time window: commits, change volume, branch, and
+# whether the work landed anywhere.
+#
+# Install:   herdr plugin install moneycaringcoder/herdr-standup
+# Local dev: herdr plugin link /path/to/herdr-standup   (does NOT run [[build]])
+# Remove:    herdr plugin unlink moneycaringcoder.standup
+# Logs:      herdr plugin log list --plugin moneycaringcoder.standup
+
+id = "moneycaringcoder.standup"
+name = "Standup"
+version = "0.1.0"
+# Oldest herdr whose session.snapshot carries the pane `cwd` and `agents` arrays
+# this plugin reads. Developed and tested against 0.8.0 / protocol 19.
+min_herdr_version = "0.7.5"
+description = "A daily digest of what your agents actually did, across every workspace."
+platforms = ["linux", "macos"]
+
+# Commands are argv arrays run with no shell and a minimal PATH, with the plugin
+# root as cwd. Compiled once at install time; the resulting binary is what every
+# command below invokes.
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+# The pane is the surface people will actually live with: today's digest, in a
+# scrollable overlay, rendered once. It is a report and not a monitor, so it
+# does not refresh on a timer and does not hold the socket open.
+[[panes]]
+id = "today"
+title = "Standup: today"
+placement = "overlay"
+command = ["./target/release/standup", "--report"]
+
+[[panes]]
+id = "since-last"
+title = "Standup: since the last one"
+placement = "overlay"
+command = ["./target/release/standup", "--report", "--since-last"]
+
+[[actions]]
+id = "today"
+title = "Standup: today"
+description = "What every workspace produced since local midnight."
+contexts = ["global", "workspace"]
+command = ["./target/release/standup", "--report"]
+
+[[actions]]
+id = "since-last"
+title = "Standup: since the last one"
+description = "Everything since the last digest you read."
+contexts = ["global", "workspace"]
+command = ["./target/release/standup", "--report", "--since-last"]
+
+[[actions]]
+id = "yesterday"
+title = "Standup: yesterday and today"
+description = "A two-day window, for the morning after."
+contexts = ["global", "workspace"]
+command = ["./target/release/standup", "--report", "--since", "yesterday"]
+
+[[actions]]
+id = "markdown"
+title = "Standup: Markdown to paste"
+description = "The same digest as Markdown, ready for a standup channel."
+contexts = ["global", "workspace"]
+command = ["./target/release/standup", "--markdown"]
+
+[[actions]]
+id = "json"
+title = "Standup: JSON snapshot"
+description = "Machine-readable digest for scripting. Does not move the --since-last marker."
+contexts = ["global", "workspace"]
+command = ["./target/release/standup", "--json"]
