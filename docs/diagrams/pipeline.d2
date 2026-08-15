@@ -1,0 +1,79 @@
+# How one digest is assembled. Drawn from the real pipeline in src/standup.rs,
+# not from an idealised version of it.
+#
+# The point the picture is making: herdr says where the agents are, and git
+# says what happened there. Neither source is trusted to answer the other's
+# question. In particular the candidate directories come from pane cwds as well
+# as from herdr's own worktree tracking, because most workspaces sitting in a
+# git checkout carry no worktree record at all.
+#
+# No unicode marks in labels - d2's bundled font renders them as tofu.
+
+direction: right
+
+classes: {
+  src: {
+    shape: rectangle
+    style: {
+      stroke: "#7ea6d8"
+      font-color: "#1f4e79"
+      fill: transparent
+      stroke-width: 3
+    }
+  }
+  step: {
+    shape: rectangle
+    style: {
+      stroke: "#8b949e"
+      font-color: "#57606a"
+      fill: transparent
+      stroke-width: 2
+    }
+  }
+  out: {
+    shape: rectangle
+    style: {
+      stroke: "#57a773"
+      font-color: "#1a7f37"
+      fill: transparent
+      stroke-width: 2
+    }
+  }
+  guard: {
+    shape: rectangle
+    style: {
+      stroke: "#d9a441"
+      font-color: "#9a6700"
+      fill: transparent
+      stroke-width: 2
+      stroke-dash: 3
+    }
+  }
+}
+
+herdr: "herdr socket\none session.snapshot" { class: src }
+disk: "your checkouts\nread-only git" { class: src }
+
+paths: "candidate directories\npane cwds + tracked\ncheckouts + --path" { class: step }
+identify: "identify\ntoplevel + common dir\nnot a repo is data" { class: step }
+siblings: "sibling worktrees\nof the same repo" { class: step }
+window: "resolve the window\nto absolute instants" { class: guard }
+collect: "per checkout\ncommits, churn, dirty\ntracking, landed" { class: step }
+group: "group by repository\ndedupe commits" { class: step }
+
+text: "terminal report" { class: out }
+markdown: "Markdown to paste" { class: out }
+json: "JSON for scripts" { class: out }
+
+herdr -> paths: "workspaces,\npanes, agents"
+paths -> identify
+identify -> siblings
+disk -> identify
+disk -> siblings
+siblings -> window
+window -> collect: "--max-age / --min-age"
+disk -> collect
+collect -> group
+group -> text
+group -> markdown
+group -> json
