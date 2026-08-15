@@ -474,13 +474,11 @@ impl Git {
         }
 
         match git_dir {
-            Some(dir) if dir.join("logs/HEAD").exists() => {
-                problems.push(format!(
-                    "branch {name} was deleted underneath this checkout; it has a HEAD reflog but \
-                     no branch to point at"
-                ));
-                Head::BranchDeleted { name }
-            }
+            // No problem is recorded here. `Head::BranchDeleted` already says
+            // this, the renderers already print it loudly, and
+            // `CheckoutReport::activity` already sorts it to the top — adding a
+            // problem as well printed the same warning twice in the live output.
+            Some(dir) if dir.join("logs/HEAD").exists() => Head::BranchDeleted { name },
             Some(_) => Head::Unborn { name },
             None => {
                 // Without the per-worktree git dir the two states cannot be told

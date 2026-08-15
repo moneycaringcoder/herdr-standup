@@ -289,8 +289,8 @@ fn display_name(id: &CheckoutId) -> String {
         .unwrap_or_else(|| id.repo_root.display().to_string())
 }
 
-/// `workspace 3 "herdr-shear": ` — so a skipped directory can be traced back to
-/// the workspace it belongs to without the reader having to guess.
+/// `workspace "notes": ` — so a skipped directory can be traced back to the
+/// workspace it belongs to without the reader having to guess.
 fn label_for(owners: &[(PathBuf, WorkspaceRef)], path: &PathBuf) -> String {
     match owners.iter().find(|(candidate, _)| candidate == path) {
         Some((_, workspace)) => format!("workspace {:?}: ", workspace.label),

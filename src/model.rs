@@ -105,11 +105,11 @@ pub struct Window {
 /// Discovery does **not** rely on `workspace.worktree`. Verified against a live
 /// 0.8.0 session: that key is present only for workspaces herdr itself opened as
 /// a repo or a worktree, and is absent for a workspace simply `cd`-ed into a
-/// checkout — five of the ten workspaces in the capture were ordinary git repos
-/// with no `worktree` key at all. Reporting only the tracked ones would silently
-/// omit most of the day's work. So the candidate paths are the union of
-/// `workspace.worktree.checkout_path` and every distinct pane `cwd`, and git
-/// decides which of them are checkouts.
+/// checkout. In a ten-workspace capture, **nine workspaces were sitting in git
+/// checkouts and only three carried a `worktree` key** — reporting the tracked
+/// ones alone would have omitted two thirds of the day's work. So the candidate
+/// paths are the union of `workspace.worktree.checkout_path` and every distinct
+/// pane `cwd`, and git decides which of them are checkouts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkspaceRef {
     pub workspace_id: String,
@@ -349,7 +349,11 @@ pub struct CheckoutReport {
 
 impl CheckoutReport {
     pub fn activity(&self) -> Activity {
-        if !self.problems.is_empty() {
+        // A branch deleted underneath a live checkout is not a reporting
+        // failure — the numbers are right — but it is somebody's work about to
+        // be lost, so it sorts to the top with the failures rather than being
+        // filed under "quiet".
+        if !self.problems.is_empty() || matches!(self.head, Head::BranchDeleted { .. }) {
             Activity::Broken
         } else if !self.commits.is_empty() {
             Activity::Active

@@ -17,8 +17,10 @@ Verbs:
   --help              Show this help
 
 Window:
-  --since <WHEN>      Anything git accepts: today, yesterday, '2 days ago',
-                      2026-08-01 (default: midnight, meaning local midnight)
+  --since <WHEN>      Anything git accepts: yesterday, '2 days ago', '09:00',
+                      2026-08-01 (default: midnight, meaning local midnight).
+                      Note that git reads 'today' as the current instant, not
+                      as the start of the day — 'midnight' is the one you want.
   --until <WHEN>      End of the window (default: now)
   --since-last        Start from the last digest you read. Falls back to the
                       default window, loudly, the first time.
@@ -45,19 +47,66 @@ fn main() {
 /// Options that take a value, and so must never be mistaken for the verb.
 const VALUED: [&str; 5] = ["--since", "--until", "--path", "--format", "--max-commits"];
 
+/// Options that stand alone.
+const FLAGS: [&str; 6] = [
+    "--since-last",
+    "--offline",
+    "--busy",
+    "--all",
+    "--no-siblings",
+    "--quiet",
+];
+
+/// Every verb, so an argument that is none of the above can be rejected.
+const VERBS: [&str; 6] = [
+    "--report",
+    "--markdown",
+    "--json",
+    "--version",
+    "--help",
+    "-h",
+];
+
+/// Rejects anything that is not a verb, an option, or an option's value.
+///
+/// Silently ignoring an argument is the same class of bug as everything else
+/// this plugin guards against: `standup --markdown "--offline --path /x"` — one
+/// quoted argument, easily produced by a shell that does not word-split —
+/// otherwise runs happily against the live session and prints a digest that
+/// answers a different question than the one asked, with nothing to notice.
+fn check_arguments(args: &[String]) -> Result<()> {
+    let mut skip_value = false;
+    let mut verb_seen = false;
+    for arg in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        let name = arg.split('=').next().unwrap_or(arg);
+        if VALUED.contains(&name) {
+            skip_value = !arg.contains('=');
+            continue;
+        }
+        if FLAGS.contains(&name) {
+            continue;
+        }
+        if VERBS.contains(&arg.as_str()) {
+            if verb_seen {
+                return Err(format!("`{arg}` is a second verb; pass only one\n\n{USAGE}").into());
+            }
+            verb_seen = true;
+            continue;
+        }
+        return Err(format!("unknown argument `{arg}`\n\n{USAGE}").into());
+    }
+    Ok(())
+}
+
 /// The verb is the first argument that is neither an option's name nor its
 /// value, so `standup --since yesterday --markdown` works as readily as
 /// `standup --markdown --since yesterday`. Ordering that matters is a papercut
 /// nobody should have to learn.
 fn verb_of(args: &[String]) -> &str {
-    const FLAGS: [&str; 6] = [
-        "--since-last",
-        "--offline",
-        "--busy",
-        "--all",
-        "--no-siblings",
-        "--quiet",
-    ];
     let mut skip_value = false;
     for arg in args {
         if skip_value {
@@ -80,6 +129,11 @@ fn verb_of(args: &[String]) -> &str {
 
 fn run(args: &[String]) -> Result<()> {
     let verb = verb_of(args);
+    // `--help` has to work even when the rest of the line is wrong; that is
+    // usually why somebody is asking for it.
+    if verb != "--help" && verb != "-h" {
+        check_arguments(args)?;
+    }
     match verb {
         "--report" | "--markdown" | "--json" => {
             let mut config = config::load_with_args(args)?;
@@ -158,5 +212,41 @@ mod tests {
     fn an_option_value_is_never_mistaken_for_a_verb() {
         // A window spec that looks like a verb must still be treated as a value.
         assert_eq!(verb_of(&args(&["--since", "--json"])), "--report");
+    }
+
+    /// Found the hard way: a shell that does not word-split an unquoted
+    /// variable hands the whole option string over as one argument. Ignoring it
+    /// ran the digest against the live session instead of the paths asked for,
+    /// and printed a perfectly plausible answer to a different question.
+    #[test]
+    fn an_argument_that_is_not_understood_is_refused() {
+        let err = super::check_arguments(&args(&["--markdown", "--offline --path /x"]))
+            .expect_err("a run-together option string must not be accepted");
+        assert!(err.to_string().contains("unknown argument"), "{err}");
+
+        assert!(super::check_arguments(&args(&["--typo"])).is_err());
+        assert!(super::check_arguments(&args(&["extra"])).is_err());
+        // A second verb is a mistake worth naming rather than silently ranking.
+        assert!(super::check_arguments(&args(&["--json", "--markdown"])).is_err());
+    }
+
+    #[test]
+    fn every_documented_spelling_is_accepted() {
+        super::check_arguments(&args(&[
+            "--markdown",
+            "--offline",
+            "--path",
+            "/x",
+            "--path=/y",
+            "--since",
+            "yesterday",
+            "--until=now",
+            "--busy",
+            "--no-siblings",
+            "--max-commits",
+            "5",
+        ]))
+        .expect("the documented spellings must all be accepted");
+        super::check_arguments(&args(&[])).expect("no arguments is the default report");
     }
 }

@@ -52,12 +52,16 @@ yields nothing at all, which looks exactly like an idle session. A missing
 `workspace.worktree` is **not** how you find the repositories in a session.
 
 It is present only for workspaces herdr itself opened as a repository or as a
-worktree. In the ten-workspace capture this plugin was built against, six
-workspaces were sitting in ordinary git checkouts and **five of them carried no
-`worktree` key at all** — they were plain directories the user had opened, which
-happen to be repositories. A digest built from `worktree` alone would have
-reported one repository and silently omitted the five where the day's work
-actually happened.
+worktree. In the ten-workspace capture this plugin was built against, **nine
+workspaces were sitting in git checkouts and only three carried a `worktree`
+key**. The other six were plain directories the user had opened, which happen to
+be repositories — including the one this plugin was written in. A digest built
+from `worktree` alone would have reported one repository and silently omitted
+two thirds of the day's work.
+
+Reproduce it against your own session with `herdr api snapshot`: count the
+workspaces with a `worktree` key, then run `git rev-parse --show-toplevel` in
+each pane `cwd` and count again.
 
 So candidate directories are the union of:
 
@@ -111,7 +115,7 @@ carries a **branch name**. standup does not use it, for two reasons:
    repository — which, per the finding above, is most of them.
 2. `git` already answers the question for every checkout, tracked or not, and is
    authoritative. In the same capture, a workspace whose directory was
-   `.../crescendo/fix-media-fetch-throughput` was on branch
+   `.../orchard/fix-slow-fetch` was checked out on the branch
    `fix/tier-promotion-scope`. Never infer a branch from a directory name.
 
 standup also sets no badge tokens and claims no panes. It is a report, not a

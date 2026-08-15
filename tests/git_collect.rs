@@ -510,12 +510,16 @@ fn a_branch_deleted_underneath_a_checkout_is_named_as_deleted() {
             name: "doomed".to_string()
         }
     );
+    // The state is carried by `Head::BranchDeleted` alone. It is deliberately
+    // *not* also pushed as a problem: the renderers print the head note loudly
+    // on its own, and recording both printed the same warning twice in the live
+    // output. `activity` is what keeps it sorted to the top regardless.
     assert!(
-        report
+        !report
             .problems
             .iter()
             .any(|p| p.contains("deleted underneath")),
-        "a deleted branch is a real problem worth naming: {:?}",
+        "the deleted-branch state belongs to Head, not to problems: {:?}",
         report.problems
     );
     assert_eq!(report.activity(), Activity::Broken);

@@ -18,7 +18,7 @@ body:
         wrong, the git command that gives the right answer is the most useful
         thing you can include.
       placeholder: |
-        The digest says herdr-shear was quiet, but `git log --since=midnight`
+        The digest says my api worktree was quiet, but `git log --since=midnight`
         in that checkout shows four commits.
     validations:
       required: true
