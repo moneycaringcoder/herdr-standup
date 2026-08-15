@@ -28,6 +28,12 @@ pub const DEFAULT_BRANCH_CANDIDATES: &[&str] = &[
 pub struct Config {
     /// Window start, as a git approxidate string.
     pub since: String,
+    /// Whether [`Config::since`] was asked for, by a `--since` on the command
+    /// line or a `since` in the config file, rather than being the built-in
+    /// default. Comparing the string against the default would get this wrong
+    /// for somebody who explicitly asks for `midnight`, and the window header
+    /// says something different in each case.
+    pub since_is_explicit: bool,
     /// Window end. `None` means "up to now".
     pub until: Option<String>,
     /// Take the window start from the previous run's timestamp.
@@ -83,6 +89,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             since: DEFAULT_SINCE.to_string(),
+            since_is_explicit: false,
             until: None,
             since_last: false,
             record_run: false,
@@ -102,6 +109,7 @@ pub fn load_with_args(args: &[String]) -> Result<Config> {
 
     if let Some(since) = value_arg(args, "--since")? {
         config.since = since;
+        config.since_is_explicit = true;
     }
     if let Some(until) = value_arg(args, "--until")? {
         config.until = Some(until);
@@ -182,6 +190,7 @@ fn load_file() -> Config {
     let mut config = Config::default();
     if let Some(since) = file.since.filter(|s| !s.trim().is_empty()) {
         config.since = since;
+        config.since_is_explicit = true;
     }
     if let Some(raw) = file.format {
         match Format::parse(&raw) {
@@ -310,6 +319,17 @@ mod tests {
         assert_eq!(parsed.since, "yesterday");
         let parsed = load_with_args(&args(&["--since", "2 days ago"])).unwrap();
         assert_eq!(parsed.since, "2 days ago");
+    }
+
+    /// Asking for `midnight` by name is not the same as not asking at all, even
+    /// though the resulting window is identical — the header explains one and
+    /// not the other.
+    #[test]
+    fn an_explicit_since_is_distinguishable_from_the_default() {
+        assert!(!load_with_args(&args(&[])).unwrap().since_is_explicit);
+        let parsed = load_with_args(&args(&["--since", DEFAULT_SINCE])).unwrap();
+        assert_eq!(parsed.since, DEFAULT_SINCE);
+        assert!(parsed.since_is_explicit);
     }
 
     #[test]
