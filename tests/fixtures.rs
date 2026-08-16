@@ -216,13 +216,23 @@ impl Fixture {
     /// Writes a file whose *name* is raw bytes, so a path can carry a space, a
     /// newline and a byte that is not valid UTF-8.
     pub fn write_raw(&self, cwd: &Path, rel: &[u8], contents: &[u8]) {
+        self.try_write_raw(cwd, rel, contents)
+            .unwrap_or_else(|e| panic!("create {:?}: {e}", bytes_to_path(rel)));
+    }
+
+    /// [`Fixture::write_raw`], handing back the error instead of panicking.
+    ///
+    /// Only one caller needs this, and the reason is a real difference between
+    /// filesystems rather than a flaky test: APFS enforces that a filename is
+    /// valid UTF-8 and refuses one that is not with `EILSEQ`, where ext4 treats
+    /// a name as arbitrary bytes with only `/` and NUL reserved.
+    pub fn try_write_raw(&self, cwd: &Path, rel: &[u8], contents: &[u8]) -> std::io::Result<()> {
         let path = cwd.join(bytes_to_path(rel));
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent");
+            std::fs::create_dir_all(parent)?;
         }
-        let mut file = std::fs::File::create(&path)
-            .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
-        file.write_all(contents).expect("write file");
+        let mut file = std::fs::File::create(&path)?;
+        file.write_all(contents)
     }
 
     /// Commits whatever is staged, at a fixed instant.
@@ -347,11 +357,30 @@ impl Fixture {
     }
 
     /// A commit touching a binary file and a path containing a space, a newline
-    /// and a byte that is not valid UTF-8. Returns the awkward path's raw bytes.
+    /// and — where the filesystem allows it — a byte that is not valid UTF-8.
+    /// Returns the awkward path's raw bytes as they were actually written.
+    ///
+    /// The non-UTF-8 byte is conditional because APFS refuses such a name
+    /// outright with `EILSEQ`, so on macOS there is no way to put one on disk to
+    /// read back. The space and the newline are exercised everywhere, and they
+    /// are the two that the `-z` framing exists for; the invalid byte only ever
+    /// tested that a `String` renders it as a replacement character.
     pub fn awkward_paths_commit(&self, epoch: i64) -> Vec<u8> {
-        let awkward: Vec<u8> = b"odd \xff\nname.txt".to_vec();
         self.write_raw(&self.repo, b"blob.bin", b"\x00\x01\x02binary\x00\xff");
-        self.write_raw(&self.repo, &awkward, b"awkward\n");
+
+        let mut awkward: Vec<u8> = b"odd \xff\nname.txt".to_vec();
+        if self
+            .try_write_raw(&self.repo, &awkward, b"awkward\n")
+            .is_err()
+        {
+            eprintln!(
+                "note: this filesystem refuses a filename that is not valid UTF-8, so the \
+                 awkward path is exercised with its space and its newline only"
+            );
+            awkward = b"odd \nname.txt".to_vec();
+            self.write_raw(&self.repo, &awkward, b"awkward\n");
+        }
+
         self.commit_all_at(&self.repo, epoch, "a binary file and an awkward path");
         awkward
     }

@@ -192,13 +192,28 @@ fn resolve_date_accepts_what_git_accepts() {
     assert_eq!(absolute, T_SINCE);
 
     // `now` genuinely means now, so it must survive the check that rejects
-    // everything else landing on now. Verified on git 2.53.0: `today` resolves
-    // to now as well, so it is on the same allowlist.
+    // everything else landing on now. `today` is on the same allowlist, and
+    // which instant it means depends on the git in front of you: through 2.54 it
+    // resolved to **now**, and 2.55 changed it to the local **midnight**.
+    // Measured on 2.53.0 and 2.54.0 (now) and on a 2.55.0 runner, where it came
+    // back 49137 seconds earlier than now — midnight to the second.
+    //
+    // Both readings are fine here, which is why this asserts the property rather
+    // than the instant. The allowlist exists so that a spec landing on the
+    // current instant is not mistaken for git's silent "I could not parse that"
+    // answer; a `today` that means midnight simply never reaches that check.
+    // What has to hold on every git is that none of these is rejected, and that
+    // each lands inside the current local day.
     for legitimate in ["now", "today", "NOW"] {
         let resolved = git
             .resolve_date(&fixture.repo, legitimate)
             .unwrap_or_else(|err| panic!("{legitimate:?} was rejected: {err}"));
-        assert!((resolved - standup::clock::now()).abs() <= 5);
+        let now_again = standup::clock::now();
+        assert!(
+            (resolved - now_again).abs() <= 5 || resolved == midnight,
+            "{legitimate:?} resolved to {resolved}, which is neither now \
+             ({now_again}) nor today's midnight ({midnight})"
+        );
     }
 }
 
@@ -365,9 +380,9 @@ fn a_binary_file_counts_as_a_file_and_an_awkward_path_survives_intact() {
     assert_eq!(commit.files.len(), 2, "{:?}", commit.files);
     assert!(commit.files.iter().any(|f| f == "blob.bin"));
 
-    // The awkward path keeps its space and its newline; the byte that is not
-    // valid UTF-8 becomes a replacement character, which is the only thing a
-    // `String` can do with it.
+    // The awkward path keeps its space and its newline; a byte that is not
+    // valid UTF-8, where the filesystem let one be written at all, becomes a
+    // replacement character, which is the only thing a `String` can do with it.
     let lossy = String::from_utf8_lossy(&awkward).into_owned();
     assert!(
         commit.files.contains(&lossy),
@@ -375,6 +390,9 @@ fn a_binary_file_counts_as_a_file_and_an_awkward_path_survives_intact() {
         commit.files
     );
     assert!(lossy.contains(' ') && lossy.contains('\n'));
+    if awkward.contains(&0xff) {
+        assert!(lossy.contains('\u{fffd}'), "{lossy:?}");
+    }
 
     // The binary file adds a file and no lines: only the awkward file's single
     // line is counted.

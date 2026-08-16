@@ -71,4 +71,9 @@ the reasoning is worth keeping.
   committer timestamps.
 - "Merged" means merged into the default branch, not into the upstream tracking
   branch. Upstream ahead/behind is reported separately.
+- `--since today` means different things on different gits, which is why
+  `midnight` is the default and why `today` is answered with a warning. Through
+  git 2.54 `today` resolves to *now*, so it asks for nothing; git 2.55 changed it
+  to the local midnight. Both are handled, and neither is mistaken for an
+  unparseable window.
 - An agent's session id appears in the JSON output only.

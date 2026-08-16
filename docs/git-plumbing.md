@@ -95,8 +95,9 @@ $ git rev-parse --since=
 --max-age=1786831294         # exit 0 — likewise
 ```
 
-There is a second, quieter surprise in the same parser: **`today` means *now*,
-not the start of the day.** Measured at 22:09 local:
+There is a second, quieter surprise in the same parser: **through git 2.54,
+`today` means *now*, not the start of the day.** Measured at 22:09 local on
+2.53.0:
 
 ```
 --since=today      -> --max-age=1786834145   # the current second
@@ -104,9 +105,18 @@ not the start of the day.** Measured at 22:09 local:
 --since=12am       -> --max-age=1786752000
 ```
 
-`midnight` is therefore standup's default, and `--since today` is answered with
-a warning rather than an empty digest, since almost nobody typing it means
-"nothing".
+**git 2.55 changed this**, and `today` there means the local midnight after all.
+Caught by CI on a 2.55.0 macOS runner, where `today` came back 49137 seconds
+before now — midnight to the second — while 2.54.0 on the same run still
+answered with the current second.
+
+So the spelling is ambiguous across the versions people actually have, which is
+the whole reason `midnight` is standup's default and `--since today` is answered
+with a warning rather than an empty digest: almost nobody typing it means
+"nothing", and on half the gits in the wild that is exactly what it would mean.
+Both readings keep `today` on `SPECS_MEANING_NOW` in `src/git.rs` — on 2.54 and
+older because it does land on now, and on 2.55 and newer harmlessly, because it
+no longer reaches the check that list guards.
 
 An unparseable window silently becomes "since now", which produces a digest that
 is empty, correctly formatted, and wrong. There is no error to notice and no
