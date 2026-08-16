@@ -9,7 +9,7 @@ over a time window — commits, change volume, branch, and whether the work land
 
 [![CI](https://github.com/moneycaringcoder/herdr-standup/actions/workflows/ci.yml/badge.svg)](https://github.com/moneycaringcoder/herdr-standup/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![herdr](https://img.shields.io/badge/herdr-%E2%89%A5%200.7.5-8b949e.svg)](https://herdr.dev)
+[![herdr](https://img.shields.io/badge/herdr-%E2%89%A5%200.8.0-8b949e.svg)](https://herdr.dev)
 [![read-only](https://img.shields.io/badge/your%20repos-never%20written%20to-2da44e.svg)](#it-never-writes-to-your-repositories)
 
 </div>
