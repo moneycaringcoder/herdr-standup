@@ -198,7 +198,14 @@ fn resolve_date_accepts_what_git_accepts() {
         let resolved = git
             .resolve_date(&fixture.repo, legitimate)
             .unwrap_or_else(|err| panic!("{legitimate:?} was rejected: {err}"));
-        assert!((resolved - standup::clock::now()).abs() <= 5);
+        let now_again = standup::clock::now();
+        assert!(
+            (resolved - now_again).abs() <= 5,
+            "{legitimate:?} resolved to {resolved}, now is {now_again}, \
+             difference {}s (midnight would be about {}s)",
+            resolved - now_again,
+            resolved - now_again
+        );
     }
 }
 
@@ -365,9 +372,9 @@ fn a_binary_file_counts_as_a_file_and_an_awkward_path_survives_intact() {
     assert_eq!(commit.files.len(), 2, "{:?}", commit.files);
     assert!(commit.files.iter().any(|f| f == "blob.bin"));
 
-    // The awkward path keeps its space and its newline; the byte that is not
-    // valid UTF-8 becomes a replacement character, which is the only thing a
-    // `String` can do with it.
+    // The awkward path keeps its space and its newline; a byte that is not
+    // valid UTF-8, where the filesystem let one be written at all, becomes a
+    // replacement character, which is the only thing a `String` can do with it.
     let lossy = String::from_utf8_lossy(&awkward).into_owned();
     assert!(
         commit.files.contains(&lossy),
@@ -375,6 +382,9 @@ fn a_binary_file_counts_as_a_file_and_an_awkward_path_survives_intact() {
         commit.files
     );
     assert!(lossy.contains(' ') && lossy.contains('\n'));
+    if awkward.contains(&0xff) {
+        assert!(lossy.contains('\u{fffd}'), "{lossy:?}");
+    }
 
     // The binary file adds a file and no lines: only the awkward file's single
     // line is counted.
