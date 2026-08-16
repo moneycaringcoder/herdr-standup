@@ -18,6 +18,8 @@ All notable changes to this project are recorded here. The format follows
   `--since-last`, which starts from the last digest a human read.
 - `--offline` and `--path`, so the digest works from a shell with no herdr
   running.
+- Arguments are validated: anything that is not a verb, an option, or an
+  option's value is refused by name rather than ignored.
 
 ### Notes on behaviour worth knowing
 

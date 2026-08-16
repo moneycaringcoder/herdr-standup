@@ -211,9 +211,13 @@ Every git invocation is read-only and passes `--no-optional-locks`, so it cannot
 agent's own git commands — plain `git status` takes `index.lock` to write back its stat cache, and
 this never does. Nothing is staged, no object is created, no ref is touched.
 
-`tests/read_only.rs` proves it rather than asserting it: it fingerprints the index bytes, the working
-tree, every ref, the reflogs and the object count of a fixture repository before and after a full
-run, and fails on any difference.
+`tests/read_only.rs` proves it rather than asserting it: it fingerprints the index bytes and mtime,
+the working tree, every ref, the reflogs, the loose-object inventory and the pack list of a fixture
+repository before and after a full run, and fails on any difference — including while another process
+holds `index.lock`. It also carries a **negative control**: a sixth check runs a plain `git status`
+*without* `--no-optional-locks` and asserts the fingerprint does fail, so the strict test cannot
+quietly stop testing anything. That distinction is measurable — plain `status` advances the index
+mtime while leaving its byte length identical, which is why mtime is fingerprinted separately.
 
 There are also **no network calls at all** — no GitHub API, no telemetry, no update check. The digest
 works on a plane.
