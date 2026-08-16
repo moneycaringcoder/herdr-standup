@@ -601,6 +601,10 @@ fn open_ended(spec: &str) -> Config {
     }
 }
 
+/// Driven with `now`, whose meaning is the same on every git. This used to be
+/// driven with `today`, which meant the same thing until git 2.55 changed it to
+/// the local midnight — so the spec that pins the *mechanism* has to be the one
+/// git has not changed its mind about. `today` gets its own test below.
 #[test]
 fn a_window_that_starts_now_is_flagged_instead_of_rendering_as_a_quiet_day() {
     let state = StateDir::new();
@@ -610,20 +614,20 @@ fn a_window_that_starts_now_is_flagged_instead_of_rendering_as_a_quiet_day() {
         &git(),
         &anchor.anchors(),
         &date_ref_repo(&state),
-        &open_ended("today"),
+        &open_ended("now"),
     )
-    .expect("git parses `today`, so this is a warning and not an error");
+    .expect("git parses `now`, so this is a warning and not an error");
 
     assert_eq!(
         window.source,
         WindowSource::Explicit {
-            spec: "today".to_string()
+            spec: "now".to_string()
         }
     );
     // It really did land on now, which is the whole problem.
     assert!(
         (clock::now() - window.since.epoch).abs() <= 5,
-        "`today` should resolve to the current instant, got {}",
+        "`now` should resolve to the current instant, got {}",
         window.since.full()
     );
 
@@ -638,6 +642,61 @@ fn a_window_that_starts_now_is_flagged_instead_of_rendering_as_a_quiet_day() {
         "the warning must name the word the user wanted: {}",
         warnings[0].message
     );
+}
+
+/// `today` is the spec people actually type, and what it means depends on the
+/// git in front of them: through 2.54 the current instant, from 2.55 the local
+/// midnight. Both are accepted rather than refused, both land inside the current
+/// local day, and the warning appears exactly when the window really is empty by
+/// construction — which is to say on the older git and not on the newer one.
+#[test]
+fn today_is_accepted_whichever_instant_this_git_thinks_it_means() {
+    let state = StateDir::new();
+    let anchor = Anchor::new();
+
+    let (window, notes) = window::resolve(
+        &git(),
+        &anchor.anchors(),
+        &date_ref_repo(&state),
+        &open_ended("today"),
+    )
+    .expect("git parses `today` on every version, so it is never an error");
+
+    assert_eq!(
+        window.source,
+        WindowSource::Explicit {
+            spec: "today".to_string()
+        }
+    );
+
+    let now = clock::now();
+    let started_now = (now - window.since.epoch).abs() <= 5;
+    assert!(
+        started_now || (window.since.epoch <= now && now - window.since.epoch < 86_400 + 3_600),
+        "`today` landed outside the current local day: {}",
+        window.since.full()
+    );
+
+    let warnings = warnings(&notes);
+    if started_now {
+        // git through 2.54.
+        assert_eq!(
+            warnings.len(),
+            1,
+            "a window starting at the current instant has to say so: {notes:?}"
+        );
+        assert!(
+            warnings[0].message.contains("midnight"),
+            "the warning must name the word the user wanted: {}",
+            warnings[0].message
+        );
+    } else {
+        // git 2.55 and newer: an ordinary full-day window, nothing to warn about.
+        assert!(
+            warnings.is_empty(),
+            "`today` meaning midnight is an ordinary window, not a problem: {notes:?}"
+        );
+    }
 }
 
 #[test]

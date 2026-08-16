@@ -139,9 +139,10 @@ pub fn resolve(
     // happened differs by source, and advice about a word the user never typed
     // is worse than no advice.
     //
-    // The common cause is `--since today`: git reads `today` as the current
-    // instant rather than as the start of the day, and `midnight` is the
-    // spelling that means 00:00 local. git accepts `today`, so `resolve_date`
+    // The common cause is `--since today` on git before 2.55, which reads
+    // `today` as the current instant rather than as the start of the day; 2.55
+    // changed it to mean 00:00 local, and `midnight` is the spelling that means
+    // that on every version. git accepts `today` either way, so `resolve_date`
     // cannot refuse it, which is exactly why it has to be caught here.
     if until.is_none() && (now - since.epoch).abs() <= NOW_WINDOW_SLACK_SECONDS {
         let advice = match &source {
@@ -150,8 +151,9 @@ pub fn resolve(
                  anything to land. Pass an explicit --since to look further back."
             }
             _ => {
-                "git reads \"today\" as the current instant rather than as the start of the \
-                 day — try --since midnight, or --since \"12 hours ago\"."
+                "\"now\", and \"today\" on git before 2.55, mean the current instant rather \
+                 than the start of the day — try --since midnight, or --since \
+                 \"12 hours ago\"."
             }
         };
         notes.push(Note::warning(format!(
