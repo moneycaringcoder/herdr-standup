@@ -6,6 +6,15 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- An advisory upstream canary. Once a day it resolves one exact herdr `master`
+  commit, fetches the API schema herdr generates from its own types at that
+  revision, and checks that the two methods standup calls and the snapshot
+  fields it reads are all still there. It is scheduled and manual only, it is
+  not a required check, and a red canary is a signal to read herdr's recent
+  changes rather than a reason to hold a pull request.
+
 ### Changed
 
 - `min_herdr_version` is now `0.8.0`, up from `0.7.5`, and the README badge
