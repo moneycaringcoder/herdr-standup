@@ -117,10 +117,16 @@ const LOG_FORMAT: &str = "--format=%x1e%H%x1f%P%x1f%an%x1f%ct%x1f%s";
 /// Specs that legitimately resolve to the current instant, and so cannot be
 /// distinguished from unparseable input by their result.
 ///
-/// Verified on git 2.53.0: `today` resolves to **now**, not to midnight, so it
-/// belongs here — rejecting it would refuse a spec git accepts. `midnight` is
-/// the spelling that means the start of the local day, and is this plugin's
-/// default window.
+/// `today` is here because of a git version difference rather than in spite of
+/// one. Through git 2.54 it resolves to **now**, not to midnight, so rejecting
+/// it would refuse a spec git accepts; git 2.55 changed it to mean the local
+/// midnight, at which point it stops landing on now and never reaches the check
+/// this list guards. Measured on 2.53.0 and 2.54.0 (now) and on 2.55.0
+/// (midnight). Listing it is correct on both, and it must stay listed for as
+/// long as anyone runs a git older than 2.55.
+///
+/// `midnight` is the spelling that means the start of the local day on every
+/// version, and is this plugin's default window.
 const SPECS_MEANING_NOW: &[&str] = &["now", "today"];
 
 /// How close to the current instant a resolved date has to be before it is

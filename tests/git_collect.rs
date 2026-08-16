@@ -192,19 +192,27 @@ fn resolve_date_accepts_what_git_accepts() {
     assert_eq!(absolute, T_SINCE);
 
     // `now` genuinely means now, so it must survive the check that rejects
-    // everything else landing on now. Verified on git 2.53.0: `today` resolves
-    // to now as well, so it is on the same allowlist.
+    // everything else landing on now. `today` is on the same allowlist, and
+    // which instant it means depends on the git in front of you: through 2.54 it
+    // resolved to **now**, and 2.55 changed it to the local **midnight**.
+    // Measured on 2.53.0 and 2.54.0 (now) and on a 2.55.0 runner, where it came
+    // back 49137 seconds earlier than now — midnight to the second.
+    //
+    // Both readings are fine here, which is why this asserts the property rather
+    // than the instant. The allowlist exists so that a spec landing on the
+    // current instant is not mistaken for git's silent "I could not parse that"
+    // answer; a `today` that means midnight simply never reaches that check.
+    // What has to hold on every git is that none of these is rejected, and that
+    // each lands inside the current local day.
     for legitimate in ["now", "today", "NOW"] {
         let resolved = git
             .resolve_date(&fixture.repo, legitimate)
             .unwrap_or_else(|err| panic!("{legitimate:?} was rejected: {err}"));
         let now_again = standup::clock::now();
         assert!(
-            (resolved - now_again).abs() <= 5,
-            "{legitimate:?} resolved to {resolved}, now is {now_again}, \
-             difference {}s (midnight would be about {}s)",
-            resolved - now_again,
-            resolved - now_again
+            (resolved - now_again).abs() <= 5 || resolved == midnight,
+            "{legitimate:?} resolved to {resolved}, which is neither now \
+             ({now_again}) nor today's midnight ({midnight})"
         );
     }
 }
