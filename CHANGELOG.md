@@ -6,6 +6,8 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-16
+
 ### Added
 
 - First release. `standup` reports what came out of a time window across every
@@ -21,7 +23,7 @@ All notable changes to this project are recorded here. The format follows
 - Arguments are validated: anything that is not a verb, an option, or an
   option's value is refused by name rather than ignored.
 
-### Fixed before release
+### Fixed before the first release
 
 Found by running the built binary against a live session and against hostile
 peers. No released version ever carried these, but each one is recorded because
