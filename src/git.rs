@@ -9,13 +9,36 @@
 //!   write back its stat cache;
 //! - reads only — no `add`, no `write-tree`, no `merge-tree`, nothing that
 //!   creates an object;
-//! - never sets `GIT_INDEX_FILE` on a real index, because it never stages;
-//! - runs with `GIT_OPTIONAL_LOCKS=0` and an object directory that would be a
-//!   temporary one if anything ever did try to write.
+//! - runs with `GIT_OPTIONAL_LOCKS=0`;
+//! - runs the two `diff --shortstat` invocations with `GIT_INDEX_FILE` pointed
+//!   at a throwaway **copy** of the worktree's index, never at the real one.
+//!
+//! That last point is not belt and braces, and it took a live reproduction to
+//! find. **`--no-optional-locks` does not cover `diff`.** `status` writes its
+//! refreshed stat cache back *optionally*, and the flag suppresses it; `diff`
+//! refreshes the index as part of doing its job, and neither
+//! `--no-optional-locks` nor `GIT_OPTIONAL_LOCKS=0` stops it. Verified on git
+//! 2.53.0 against a checkout with one tracked file rewritten with identical
+//! bytes — an ordinary editor save is enough to trigger it:
+//!
+//! ```text
+//! baseline index                                             791c22ab…
+//! GIT_OPTIONAL_LOCKS=0 git --no-optional-locks status …      791c22ab…  unchanged
+//! GIT_OPTIONAL_LOCKS=0 git --no-optional-locks diff --shortstat
+//!                                                            cb788797…  REWRITTEN
+//! the same diff with GIT_INDEX_FILE on a copy                791c22ab…  unchanged
+//! ```
+//!
+//! It also takes `index.lock`, so without the copy this plugin would contend
+//! with an agent running `git add` in the same checkout — the exact concurrency
+//! it advertises as safe. See [`ScratchIndex`].
 //!
 //! `tests/read_only.rs` fingerprints the index, working tree, refs and loose
 //! object count of a fixture repository before and after a full run and fails on
 //! any difference. That test is the contract; this module is its implementation.
+//! It only has teeth against a **stale** stat cache, because a fresh one gives
+//! git nothing to write back — which is exactly how this bug survived the first
+//! version of that test.
 //!
 //! # The traps this module exists to avoid
 //!
@@ -296,7 +319,7 @@ impl Git {
             Head::Unborn { .. } => (Vec::new(), Churn::default()),
             _ => self.commits(&path, window, &mut problems),
         };
-        let dirty = self.dirty(&path, &mut problems);
+        let dirty = self.dirty(&path, git_dir.as_deref(), &mut problems);
         let tracking = self.tracking(&path, &head, &mut problems);
         let landed = self.landed(&path, &head, &mut problems);
 
@@ -357,32 +380,33 @@ impl Git {
     /// Creates, if needed, an empty bare repository used only as a context for
     /// [`Git::resolve_date`] when the session has no checkouts of its own.
     /// `git rev-parse` refuses to run outside a repository.
+    ///
+    /// # Why there is no "refuse if this is inside a repository" guard
+    ///
+    /// An earlier version refused when the parent directory was inside a git
+    /// repository, reasoning that the plugin should never create anything in a
+    /// user's checkout. That guard was wrong, and it broke the plugin outright
+    /// on a machine where it matters most: a home directory kept in git —
+    /// ordinary dotfiles — puts the default state directory
+    /// (`~/.local/state/herdr/plugins/<id>/`) inside a repository, so every run
+    /// with no usable checkout to anchor date parsing died with
+    /// `refusing to create the date-reference repository`. Confirmed on the
+    /// development machine, whose `$HOME` is a checkout.
+    ///
+    /// The guard also protected very little. `git init --bare` writes only
+    /// inside the directory it creates; it stages nothing, touches no index and
+    /// moves no ref in the enclosing repository. What actually matters is the
+    /// precision below: an enclosing repository must never be *mistaken* for
+    /// this one, which is why the idempotence check compares the resolved git
+    /// directory with the target path instead of merely asking "is this a
+    /// repository".
     pub fn ensure_date_ref_repo(&self, path: &Path) -> Result<()> {
-        let parent = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("could not create {}: {err}", parent.display()))?;
-
-        // The one place this module creates anything, so it is also the one
-        // place that has to prove it is not standing in somebody's repository.
-        // Checked before the idempotence probe below, because inside a user
-        // repository that probe would answer "already a repository" about the
-        // *enclosing* checkout and quietly do the wrong thing.
-        if let Ok(out) = self.run(parent, &["rev-parse", "--git-dir"]) {
-            if out.ok() {
-                return Err(format!(
-                    "refusing to create the date-reference repository at {}: {} is already inside \
-                     a git repository",
-                    path.display(),
-                    parent.display()
-                )
-                .into());
-            }
-        }
-
-        // Idempotent: an existing repository here is the normal case after the
-        // first run.
-        if let Ok(out) = self.run(path, &["rev-parse", "--git-dir"]) {
-            if out.ok() {
+        // Idempotent, but only for a repository that really is *at* this path.
+        // A bare `rev-parse --git-dir` succeeds from anywhere inside an
+        // enclosing checkout, and treating that as "already created" would
+        // silently resolve every window inside the user's own repository.
+        if let Ok(out) = self.run(path, &["rev-parse", "--path-format=absolute", "--git-dir"]) {
+            if out.ok() && canonical(Path::new(&out.stdout_text())) == canonical(path) {
                 return Ok(());
             }
         }
@@ -555,7 +579,7 @@ impl Git {
     /// Uncommitted work. Counts come from `status --porcelain=v2`, line volume
     /// from `diff --shortstat`, because `status` does not count lines and
     /// `diff` does not see untracked files.
-    fn dirty(&self, path: &Path, problems: &mut Vec<String>) -> Dirty {
+    fn dirty(&self, path: &Path, git_dir: Option<&Path>, problems: &mut Vec<String>) -> Dirty {
         let mut dirty = Dirty::default();
 
         if let Some(out) = self.capture(
@@ -598,23 +622,51 @@ impl Git {
             }
         }
 
-        for args in [
-            ["diff", "--shortstat"].as_slice(),
-            ["diff", "--cached", "--shortstat"].as_slice(),
-        ] {
-            if let Some(out) = self.capture(path, args, problems) {
-                if out.ok() {
-                    let (insertions, deletions) = parse_shortstat(&out.stdout_text());
-                    dirty.insertions += insertions;
-                    dirty.deletions += deletions;
-                } else {
-                    problems.push(format!(
-                        "could not measure uncommitted changes in {}: {}",
-                        path.display(),
-                        out.stderr_text()
-                    ));
+        // The line volume, and the one place in this module that has to protect
+        // the index by hand. `diff` refreshes the index and writes it back, and
+        // that refresh is **not** the optional kind: neither
+        // `--no-optional-locks` nor `GIT_OPTIONAL_LOCKS=0` suppresses it. Both
+        // diffs therefore run against a throwaway copy of the worktree's index,
+        // which is also what keeps them from contending for `index.lock` with an
+        // agent running `git add` in the same checkout.
+        match ScratchIndex::of(git_dir) {
+            // No index at all: a repository where nothing has ever been staged.
+            // Both diffs are empty by construction, and running them against a
+            // GIT_INDEX_FILE that does not exist would be worse than not running
+            // them — an empty index makes `diff --cached` report every tracked
+            // file as deleted.
+            Ok(None) => {}
+            Ok(Some(scratch)) => {
+                let index_file = [("GIT_INDEX_FILE", scratch.path())];
+                for args in [
+                    ["diff", "--shortstat"].as_slice(),
+                    ["diff", "--cached", "--shortstat"].as_slice(),
+                ] {
+                    if let Some(out) = self.capture_env(path, args, &index_file, problems) {
+                        if out.ok() {
+                            let (insertions, deletions) = parse_shortstat(&out.stdout_text());
+                            dirty.insertions += insertions;
+                            dirty.deletions += deletions;
+                        } else {
+                            problems.push(format!(
+                                "could not measure uncommitted changes in {}: {}",
+                                path.display(),
+                                out.stderr_text()
+                            ));
+                        }
+                    }
                 }
             }
+            // Deliberately not a fallback to the real index. Measuring the line
+            // volume is worth less than the promise that this plugin never
+            // writes to a repository, so the counts are left at zero and the
+            // reason is rendered.
+            Err(err) => problems.push(format!(
+                "could not measure uncommitted line counts in {}: {err}. The file counts above \
+                 are still accurate; the line counts are not, because measuring them safely \
+                 needs a scratch copy of the index and one could not be made.",
+                path.display()
+            )),
         }
 
         dirty
@@ -814,7 +866,19 @@ impl Git {
     /// problems on the report. A non-zero exit is handed back for the caller to
     /// interpret, because for most of these commands it is an answer.
     fn capture(&self, dir: &Path, args: &[&str], problems: &mut Vec<String>) -> Option<GitOut> {
-        match self.run(dir, args) {
+        self.capture_env(dir, args, &[], problems)
+    }
+
+    /// [`Git::capture`] with extra environment, used only to point
+    /// `GIT_INDEX_FILE` at a scratch copy for the two `diff` invocations.
+    fn capture_env(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        extra_env: &[(&str, &Path)],
+        problems: &mut Vec<String>,
+    ) -> Option<GitOut> {
+        match self.run_env(dir, args, extra_env) {
             Ok(out) if out.timed_out => {
                 problems.push(format!(
                     "git {} timed out after {:?} in {}",
@@ -865,6 +929,12 @@ impl Git {
     /// a child that fills the 64 KiB pipe buffer blocks forever otherwise, and
     /// `log --numstat` over a busy day comfortably exceeds that.
     fn run(&self, dir: &Path, args: &[&str]) -> Result<GitOut> {
+        self.run_env(dir, args, &[])
+    }
+
+    /// [`Git::run`], with environment this module sets on purpose applied
+    /// *after* the inherited environment is scrubbed.
+    fn run_env(&self, dir: &Path, args: &[&str], extra_env: &[(&str, &Path)]) -> Result<GitOut> {
         let mut command = Command::new(&self.program);
         command.arg("-C").arg(dir);
         // Global, before the subcommand: plain `status` takes `index.lock` to
@@ -903,6 +973,10 @@ impl Git {
         // Everything parsed here is machine output, and a localised git would
         // translate the words this module keys off.
         command.env("LC_ALL", "C");
+        // Applied last, so a deliberate GIT_INDEX_FILE survives the scrub above.
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
 
         let mut child = command.spawn().map_err(|err| {
             format!(
@@ -950,6 +1024,73 @@ impl Git {
             stderr: err_reader.join().unwrap_or_default(),
             timed_out,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The scratch index
+// ---------------------------------------------------------------------------
+
+/// A throwaway copy of a worktree's index, deleted when it goes out of scope.
+///
+/// It exists for one reason. `git diff` refreshes the index and writes the
+/// refreshed stat data back whenever a tracked file's cached stat data is
+/// stale — which an ordinary editor save of identical content is enough to
+/// cause. That refresh is **not** the optional kind: verified on git 2.53.0,
+/// `GIT_OPTIONAL_LOCKS=0 git --no-optional-locks diff --shortstat` still
+/// rewrites the index and still takes `index.lock`. `status --porcelain=v2`
+/// with the same flags does not.
+///
+/// Pointing `GIT_INDEX_FILE` at a copy makes the diff read the same content and
+/// write its refresh into the copy instead. Verified: the real index stayed
+/// byte-identical and only the copy moved.
+///
+/// The copy lives in the system temp directory, never beside the repository,
+/// and is named for this process and an increasing counter so concurrent
+/// reports of different checkouts cannot collide.
+struct ScratchIndex {
+    path: PathBuf,
+}
+
+impl ScratchIndex {
+    /// `Ok(None)` means the worktree has no index to copy, which is a real
+    /// state — a repository where nothing has ever been staged — and one where
+    /// both `diff --shortstat` forms are empty anyway.
+    fn of(git_dir: Option<&Path>) -> std::result::Result<Option<ScratchIndex>, std::io::Error> {
+        let Some(git_dir) = git_dir else {
+            return Err(std::io::Error::other(
+                "the per-worktree git directory could not be read",
+            ));
+        };
+        let source = git_dir.join("index");
+        if !source.is_file() {
+            return Ok(None);
+        }
+
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("standup-index-{}-{seq}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        // A byte copy rather than `read-tree`: copying keeps the stat cache, so
+        // the diff does the same work it would have done against the real index
+        // and reports the same numbers.
+        std::fs::copy(&source, &path)?;
+        Ok(Some(ScratchIndex { path }))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        // git writes `<index>.lock` and renames it into place; a killed
+        // invocation can leave one behind, and it is ours to clean up.
+        let mut lock = self.path.clone().into_os_string();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(PathBuf::from(lock));
     }
 }
 

@@ -88,8 +88,24 @@ fn a_plain_directory_is_ordinary_data_not_a_failure() {
     let fixture = Fixture::new("not-a-repo");
     let plain = fixture.root().join("home");
     let git = git();
-    assert_eq!(git.identify(&plain).expect("git ran"), None);
-    // A path that does not exist at all is the same answer.
+
+    // Only meaningful where the temp directory is not itself inside a
+    // repository. A home directory kept in git, with `TMPDIR` pointed inside
+    // it, makes every directory under it part of a checkout — correctly, and
+    // git agrees — so there is nothing to assert. Said out loud rather than
+    // asserted falsely.
+    let (enclosed, _, _) = fixture.try_git(&plain, &["rev-parse", "--git-dir"]);
+    if enclosed == 0 {
+        eprintln!(
+            "note: {} is inside a git repository, so the plain-directory half of this test \
+             cannot run here",
+            plain.display()
+        );
+    } else {
+        assert_eq!(git.identify(&plain).expect("git ran"), None);
+    }
+
+    // A path that does not exist at all is the same answer, everywhere.
     assert_eq!(
         git.identify(&fixture.root().join("nowhere"))
             .expect("git ran"),
@@ -205,16 +221,47 @@ fn the_date_reference_repository_is_created_once_and_reused() {
     assert!(git.resolve_date(&dateref, "bogusgarbage").is_err());
 }
 
+/// A home directory kept in git — ordinary dotfiles — puts the plugin's own
+/// state directory inside a repository. That must work, and it must not be
+/// mistaken for the date-reference repository already existing.
+///
+/// The earlier version of this test asserted the opposite, and the guard it
+/// pinned made `standup` fail outright on exactly that setup whenever no
+/// checkout was available to anchor date parsing.
 #[test]
-fn the_date_reference_repository_is_never_created_inside_a_user_repository() {
-    let fixture = Fixture::new("date-ref-guard");
+fn a_date_reference_repository_inside_another_repository_works_and_disturbs_nothing() {
+    let fixture = Fixture::new("date-ref-nested");
     let git = git();
     let inside = fixture.repo.join("state/dateref.git");
-    let err = git
-        .ensure_date_ref_repo(&inside)
-        .expect_err("creating a repo inside a user checkout must be refused");
-    assert!(err.to_string().contains("already inside a git repository"));
-    assert!(!inside.join("HEAD").exists());
+
+    let refs_before = fixture.git(&fixture.repo, &["for-each-ref"]);
+    let index_before = std::fs::read(fixture.git_dir(&fixture.repo).join("index")).expect("index");
+
+    git.ensure_date_ref_repo(&inside)
+        .expect("a state directory inside a checkout is where dotfiles users keep theirs");
+
+    // It really is its own repository, not the enclosing one seen from inside.
+    assert!(inside.join("HEAD").is_file());
+    assert_eq!(
+        std::fs::canonicalize(fixture.git(
+            &inside,
+            &["rev-parse", "--path-format=absolute", "--git-dir"]
+        ))
+        .unwrap(),
+        std::fs::canonicalize(&inside).unwrap()
+    );
+    assert!(git.resolve_date(&inside, "midnight").is_ok());
+
+    // And the enclosing checkout is untouched: no staged file, no moved ref, no
+    // rewritten index.
+    assert_eq!(fixture.git(&fixture.repo, &["for-each-ref"]), refs_before);
+    assert_eq!(
+        std::fs::read(fixture.git_dir(&fixture.repo).join("index")).expect("index"),
+        index_before
+    );
+
+    // Idempotent here too.
+    git.ensure_date_ref_repo(&inside).expect("reuse");
 }
 
 // ---------------------------------------------------------------------------

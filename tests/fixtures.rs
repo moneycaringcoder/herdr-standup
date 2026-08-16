@@ -532,6 +532,35 @@ impl Fixture {
         self.write(cwd, "build.log", "noise\n");
     }
 
+    /// Makes the index's stat cache stale for every tracked file, which is the
+    /// state in which git wants to refresh and write the index back.
+    ///
+    /// This matters more than it looks. A checkout whose stat cache is *fresh*
+    /// gives git nothing to write, so a read-only assertion made against one
+    /// passes no matter what the code under test does — that is precisely how
+    /// `diff --shortstat` rewriting the index went unnoticed. The two sleeps
+    /// straddle git's one-second racy-clean window, so what is measured is a
+    /// genuine refresh rather than the race.
+    ///
+    /// The bytes are rewritten identically: nothing about the *content* of the
+    /// checkout changes, only the mtime git cached for it — an ordinary editor
+    /// save is enough to produce this in real life.
+    pub fn make_stat_cache_stale(&self, cwd: &Path) {
+        // Start from an index git is happy with, so every later difference is
+        // one the code under test caused.
+        self.git(cwd, &["status", "--porcelain"]);
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+        let tracked = self.git(cwd, &["ls-files", "-z"]);
+        for name in tracked.split('\0').filter(|n| !n.is_empty()) {
+            let path = cwd.join(name);
+            if let Ok(bytes) = std::fs::read(&path) {
+                let _ = std::fs::write(&path, bytes);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+    }
+
     /// A worktree stopped mid-merge, with an unmerged index and conflict markers
     /// on disk.
     pub fn merge_in_progress_worktree(&self, name: &str) -> PathBuf {

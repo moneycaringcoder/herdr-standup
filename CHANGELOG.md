@@ -21,6 +21,41 @@ All notable changes to this project are recorded here. The format follows
 - Arguments are validated: anything that is not a verb, an option, or an
   option's value is refused by name rather than ignored.
 
+### Fixed before release
+
+Found by running the built binary against a live session and against hostile
+peers. No released version ever carried these, but each one is recorded because
+the reasoning is worth keeping.
+
+- The two `diff --shortstat` calls that measure uncommitted line volume were
+  rewriting the user's index. `--no-optional-locks` does not cover `git diff`,
+  whose index refresh is not optional; they now run against a copy of the index.
+  The read-only test could not catch it because it freshened the stat cache
+  before fingerprinting, and a fresh cache is exactly the state in which the
+  writeback does not happen.
+- A herdr reply with no end-of-line was read until the process died. The framing
+  is newline-delimited, so a peer that never sends a newline never stops; the
+  real binary grew to 5.3 GB in thirteen seconds and was killed. Responses are
+  now bounded at 4 MiB, which is roughly eighty times a live nineteen-pane
+  snapshot, and going past it is a named transport failure.
+- A workspace whose directory had been removed underneath it reported the same
+  checkout twice, once with the kernel's `(deleted)` marker appended, and the
+  digest printed the same "is not a git checkout" note twice. The marker is an
+  annotation rather than part of the name, so it is stripped and the pair
+  collapses.
+- A last-run marker that existed but could not be read was announced as "no
+  previous run on record" — word for word what a genuine first run says. A first
+  run is normal and this is a fault, so it is now a warning in the digest that
+  names the file to delete.
+- `ensure_date_ref_repo` refused to create the date-reference repository when its
+  parent was inside a git repository, which broke the plugin outright for anyone
+  keeping their home directory in git: the default state directory then sits
+  inside a checkout, and every run with no usable checkout to anchor date parsing
+  died. The guard protected nothing — `git init --bare` writes only inside the
+  directory it creates — and it is replaced by comparing the resolved git
+  directory with the target path, so an enclosing repository can never be
+  mistaken for this one.
+
 ### Notes on behaviour worth knowing
 
 - Checkouts are discovered from pane working directories as well as herdr's own

@@ -22,6 +22,13 @@ So any change touching `src/git.rs` must keep these true:
 - nothing is ever staged, and `GIT_INDEX_FILE` is never pointed at a real index
 - no command creates an object, mutates a ref, or touches the working tree
 
+And one thing that is not obvious: **`--no-optional-locks` does not cover `git
+diff`.** Diff's index refresh is not optional, so it rewrites the index — and
+takes `index.lock` — whenever a tracked file's stat data is stale. The
+`--shortstat` calls run against a copy of the index for exactly this reason. If
+you add a `diff`, it needs the same treatment. `docs/git-plumbing.md` has the
+measurement.
+
 `tests/read_only.rs` enforces it by fingerprinting the index bytes, working
 tree, refs, reflogs and object count before and after a full run. If your change
 makes that test fail, the test is right and the change is wrong.

@@ -9,13 +9,47 @@ with the experiment that produced them.
 1. Always pass `--no-optional-locks`. Plain `git status` takes
    `<gitdir>/index.lock` to write back its stat cache; with the flag it does
    not. standup runs against repositories where an agent may be mid-commit.
-2. Never stage anything, never point `GIT_INDEX_FILE` at a real index, never run
-   a command that creates an object. standup has no reason to write, so it has
-   no code path that could.
-3. Set `LC_ALL=C`. Several of the strings parsed below are only stable in the C
+2. **`--no-optional-locks` does not cover `git diff`.** See below — this one cost
+   a real bug.
+3. Never stage anything, never point `GIT_INDEX_FILE` at a real index, never run
+   a command that creates an object. The `--shortstat` copy below is the one
+   sanctioned exception, and it is a copy precisely so that the rule holds.
+4. Set `LC_ALL=C`. Several of the strings parsed below are only stable in the C
    locale.
-4. Resolve the `git` binary explicitly. herdr runs plugin commands with **no
+5. Resolve the `git` binary explicitly. herdr runs plugin commands with **no
    shell and a minimal `PATH`**.
+
+## The flag does not cover `diff`
+
+`git diff` refreshes the index and writes it back, and that refresh is **not**
+optional: neither `--no-optional-locks` nor `GIT_OPTIONAL_LOCKS=0` suppresses it.
+Both only suppress git's *optional* writeback, which is what `status` does.
+
+Measured on git 2.53.0 against one committed file, `touch`ed so its stat data is
+stale and nothing else:
+
+```
+baseline index md5                                          791c22ab…
+env GIT_OPTIONAL_LOCKS=0 git --no-optional-locks diff --shortstat
+                                                            cb788797…   rewritten
+env GIT_OPTIONAL_LOCKS=0 git --no-optional-locks status --porcelain=v2 -z -uall
+                                                            unchanged
+```
+
+It fires whenever a tracked file's stat data is stale — an ordinary editor save
+of identical content is enough, as is `sed -i`, a formatter, or a build step —
+and it takes `index.lock`, so it can collide with an agent's own `git add` in
+the same checkout. No data is lost, but the promise is broken and the lock
+contention is real.
+
+So the two `--shortstat` invocations in `Git::dirty` run with `GIT_INDEX_FILE`
+pointed at a **copy** of the per-worktree index. The copy absorbs the writeback,
+the real index stays byte-identical, and the copy is deleted afterwards. This is
+the one sanctioned use of `GIT_INDEX_FILE` in the crate.
+
+This was missed for a while because `tests/read_only.rs` freshened the stat cache
+before fingerprinting, and a fresh cache is exactly the state in which the
+writeback does not happen. The test now makes the cache **stale** on purpose.
 
 ## Repo identity
 

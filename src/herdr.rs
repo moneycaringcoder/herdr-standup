@@ -34,8 +34,9 @@
 //! directory.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -49,6 +50,20 @@ use crate::Result;
 /// Long enough that a busy server is not mistaken for a dead one, short enough
 /// that a digest can never park forever on a half-open socket.
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Ceiling on one response line.
+///
+/// The framing is newline-delimited, so a peer that never sends a newline is a
+/// peer that never stops: reading such a line into a `String` grew the process
+/// to 5.3 GB in thirteen seconds and had it killed by the OOM killer. Verified
+/// against a socket that streams padding forever, and against a well-formed
+/// 5.8 MB reply.
+///
+/// The figure is deliberately generous. A live nineteen-pane session answers
+/// `session.snapshot` in about 54 KB — roughly 2.8 KB per pane — so this leaves
+/// room for a session an order of magnitude larger than any real one while
+/// still turning a runaway peer into a named error rather than a dead process.
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// A herdr error envelope, carried as a real error type so callers can tell a
 /// rejected request from a transport failure.
@@ -174,10 +189,31 @@ impl Herdr {
             .and_then(|()| (&stream).flush())
             .map_err(|e| Failure::Transport(format!("write to {method} failed: {e}")))?;
 
+        // Bounded, because the peer decides where the line ends and a broken one
+        // never says. One extra byte is allowed through so that a reply landing
+        // exactly on the ceiling can still be told apart from one that ran past
+        // it.
         let mut response = String::new();
-        BufReader::new(&stream)
+        let read = BufReader::new((&stream).take(MAX_RESPONSE_BYTES + 1))
             .read_line(&mut response)
-            .map_err(|e| Failure::Transport(format!("read of {method} response failed: {e}")))?;
+            .map_err(|e| {
+                Failure::Transport(match e.kind() {
+                    // The read timeout firing. The raw message for this is
+                    // "Resource temporarily unavailable", which tells a person
+                    // nothing at all about what went wrong.
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut => format!(
+                        "herdr accepted the connection but did not answer {method} within {}s",
+                        IO_TIMEOUT.as_secs()
+                    ),
+                    _ => format!("read of {method} response failed: {e}"),
+                })
+            })?;
+        if read as u64 > MAX_RESPONSE_BYTES {
+            return Err(Failure::Transport(format!(
+                "the response to {method} went past the {MAX_RESPONSE_BYTES}-byte ceiling; \
+                 giving up rather than reading until this process is killed"
+            )));
+        }
         if response.trim().is_empty() {
             return Err(Failure::Transport(
                 "server closed the connection without answering".into(),
@@ -273,9 +309,19 @@ pub fn reduce_snapshot(snapshot: &Value) -> Vec<WorkspaceRef> {
 /// filter.
 fn paths_of(workspace: &Value, panes: &[&Value]) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
+    // Order is carried by the vector; membership by the set, so a workspace with
+    // a great many panes stays linear rather than quadratic.
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut push = |paths: &mut Vec<PathBuf>, raw: &str| {
+        let path = tidy_path(raw);
+        if seen.insert(path.clone()) {
+            paths.push(path);
+        }
+    };
+
     if let Some(worktree) = workspace.get("worktree").filter(|w| w.is_object()) {
         if let Some(checkout) = text(worktree, "checkout_path") {
-            push_unique(&mut paths, tidy_path(checkout));
+            push(&mut paths, checkout);
         }
     }
     for pane in panes {
@@ -283,7 +329,7 @@ fn paths_of(workspace: &Value, panes: &[&Value]) -> Vec<PathBuf> {
         // process and was observed pointing at a pyright install for a pane
         // whose real cwd was a repository.
         if let Some(cwd) = text(pane, "cwd") {
-            push_unique(&mut paths, tidy_path(cwd));
+            push(&mut paths, cwd);
         }
     }
     paths
@@ -293,9 +339,13 @@ fn paths_of(workspace: &Value, panes: &[&Value]) -> Vec<PathBuf> {
 /// stable between runs.
 fn agents_of(workspace_id: &str, agent_rows: &[Value], panes: &[&Value]) -> Vec<AgentRef> {
     let mut agents: Vec<AgentRef> = Vec::new();
+    let mut joined: HashSet<&str> = HashSet::new();
     for row in agent_rows {
         if text(row, "workspace_id") != Some(workspace_id) {
             continue;
+        }
+        if let Some(pane_id) = text(row, "pane_id") {
+            joined.insert(pane_id);
         }
         agents.push(AgentRef {
             // The user's own label ("shear-classifier"), absent for agents they
@@ -320,7 +370,7 @@ fn agents_of(workspace_id: &str, agent_rows: &[Value], panes: &[&Value]) -> Vec<
         let Some(program) = text(pane, "agent") else {
             continue;
         };
-        if agents.iter().any(|agent| agent.pane_id == pane_id) {
+        if !joined.insert(pane_id) {
             continue;
         }
         agents.push(AgentRef {
@@ -346,14 +396,35 @@ fn session_id(row: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Drops `.` components from a path herdr reports.
+/// The suffix Linux appends to the working directory of a process whose
+/// directory has been removed, as read back through `/proc/<pid>/cwd`.
+const DELETED_MARKER: &str = " (deleted)";
+
+/// Normalises a path herdr reports back at us.
 ///
-/// herdr echoes back whatever path a workspace was created with, so one made
-/// with `--cwd .` arrives as `/home/you/repos/app/.`. The path still resolves,
-/// but it is rendered in the digest and it is used as a dictionary key for
-/// joining workspaces to checkouts, where the trailing `.` would split one
-/// directory into two.
+/// Two annotations come off, and both matter because these paths are rendered in
+/// the digest *and* used as the key that joins workspaces to checkouts, where a
+/// difference of one character splits one directory into two.
+///
+/// 1. **A `.` component.** herdr echoes back whatever path a workspace was
+///    created with, so one made with `--cwd .` arrives as
+///    `/home/you/repos/app/.`.
+/// 2. **A trailing `(deleted)` marker.** Observed live: a workspace reported
+///    `worktree.checkout_path` as `…/fx/repo` while its only pane reported `cwd`
+///    as `…/fx/repo (deleted)`, because the directory had been removed under the
+///    running shell. That reduced to two candidate directories and printed the
+///    same "is not a git checkout" note twice, with both lines truncated at the
+///    same column so they read as an exact duplicate.
+///
+/// The marker is the kernel's annotation rather than part of the name, so it
+/// comes off and the pair collapses. A directory genuinely named `… (deleted)`
+/// would be probed under its unsuffixed name instead — the cheaper mistake, and
+/// one the marker makes unavoidable for any such name anyway.
 fn tidy_path(raw: &str) -> PathBuf {
+    let raw = raw
+        .strip_suffix(DELETED_MARKER)
+        .filter(|stripped| !stripped.is_empty())
+        .unwrap_or(raw);
     let path = Path::new(raw);
     let tidied: PathBuf = path
         .components()
@@ -424,12 +495,6 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value.get(key).and_then(Value::as_array).map_or(&[], |a| a)
 }
 
-fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.contains(&path) {
-        paths.push(path);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,6 +515,25 @@ mod tests {
         assert_eq!(tidy_path("/home/you/repo"), PathBuf::from("/home/you/repo"));
         // A path that is nothing but `.` still has to resolve to something.
         assert_eq!(tidy_path("."), PathBuf::from("."));
+    }
+
+    #[test]
+    fn the_kernels_deleted_marker_is_not_part_of_the_name() {
+        assert_eq!(
+            tidy_path("/home/you/repo (deleted)"),
+            PathBuf::from("/home/you/repo")
+        );
+        // Only as a suffix, and only the exact marker.
+        assert_eq!(
+            tidy_path("/home/you/repo (deleted)/src"),
+            PathBuf::from("/home/you/repo (deleted)/src")
+        );
+        assert_eq!(
+            tidy_path("/home/you/deleted"),
+            PathBuf::from("/home/you/deleted")
+        );
+        // Stripping down to nothing would be worse than keeping the marker.
+        assert_eq!(tidy_path(" (deleted)"), PathBuf::from(" (deleted)"));
     }
 
     #[test]

@@ -211,6 +211,12 @@ Every git invocation is read-only and passes `--no-optional-locks`, so it cannot
 agent's own git commands — plain `git status` takes `index.lock` to write back its stat cache, and
 this never does. Nothing is staged, no object is created, no ref is touched.
 
+One subtlety worth knowing, because it is easy to get wrong: **`--no-optional-locks` does not cover
+`git diff`.** Diff's index refresh is not optional, so it writes the index back — and takes
+`index.lock` to do it — whenever a tracked file's stat data is stale, which an ordinary editor save
+is enough to cause. The two `diff --shortstat` calls that measure uncommitted line volume therefore
+run against a *copy* of the index, which absorbs the writeback and is thrown away.
+
 `tests/read_only.rs` proves it rather than asserting it: it fingerprints the index bytes and mtime,
 the working tree, every ref, the reflogs, the loose-object inventory and the pack list of a fixture
 repository before and after a full run, and fails on any difference — including while another process

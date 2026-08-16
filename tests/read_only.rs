@@ -309,6 +309,36 @@ fn assert_unchanged(before: &Fingerprint, after: &Fingerprint) {
     );
 }
 
+/// The scratch indexes `Git::dirty` copies live in the shared temp directory
+/// and are named for this process, so a leftover is detectable — but only in a
+/// window where no sibling test in this binary is holding one. [`scratch_guard`]
+/// creates that window.
+fn assert_no_scratch_indexes() {
+    let prefix = format!("standup-index-{}-", std::process::id());
+    let mut leftovers = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                leftovers.push(entry.path());
+            }
+        }
+    }
+    assert!(
+        leftovers.is_empty(),
+        "scratch index copies were left behind: {leftovers:?}"
+    );
+}
+
+/// Serialises the tests in this file. They all report on checkouts, so they
+/// each create scratch indexes under the shared temp directory and cannot judge
+/// each other's leftovers.
+fn scratch_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // The pipeline under test
 // ---------------------------------------------------------------------------
@@ -348,6 +378,11 @@ fn kitchen_sink(tag: &str) -> (Fixture, Vec<PathBuf>) {
     // the places most likely to be written back somewhere they should not be.
     fixture.dirty_up(&fixture.repo);
     fixture.dirty_up(&published);
+
+    // Without this the whole fixture is a checkout git has nothing to write
+    // back to, and every assertion below is satisfied by doing nothing.
+    fixture.make_stat_cache_stale(&fixture.repo);
+    fixture.make_stat_cache_stale(&published);
 
     let worktrees = vec![
         fixture.repo.clone(),
@@ -394,6 +429,7 @@ fn run_full_pipeline(git: &Git, fixture: &Fixture, worktrees: &[PathBuf]) -> Vec
 
 #[test]
 fn the_full_pipeline_changes_nothing_in_the_repository() {
+    let _serialised = scratch_guard();
     let (fixture, worktrees) = kitchen_sink("read-only");
     let git = Git::new(TIMEOUT);
 
@@ -419,21 +455,31 @@ fn the_full_pipeline_changes_nothing_in_the_repository() {
 
     let after = fingerprint(&fixture, &worktrees);
     assert_unchanged(&before, &after);
+    assert_no_scratch_indexes();
 }
 
-/// The specific writeback `--no-optional-locks` exists to prevent. Without the
-/// flag, a plain `status` takes `index.lock` and rewrites the index to save its
-/// stat cache; the mtime assertion above is what catches it.
+/// The writeback the whole module is arranged to avoid.
+///
+/// The subtlety this test got wrong once, and which let a real bug through: a
+/// checkout whose stat cache is **fresh** gives git nothing to write back, so
+/// the test passed even with `--no-optional-locks` deleted from `src/git.rs`
+/// outright. The cache has to be made *stale* first, and staleness needs two
+/// things — a tracked file rewritten with identical bytes, and enough elapsed
+/// time on either side that git's one-second racy-clean window is not what is
+/// being measured.
+///
+/// With that in place this catches both writers: `status` without
+/// `--no-optional-locks`, and `diff`, whose index refresh is **not** optional
+/// and which neither the flag nor `GIT_OPTIONAL_LOCKS=0` suppresses.
 #[test]
 fn reporting_a_dirty_checkout_does_not_rewrite_its_index() {
+    let _serialised = scratch_guard();
     let fixture = Fixture::new("index-writeback");
     fixture.dirty_up(&fixture.repo);
     let worktrees = vec![fixture.repo.clone()];
     let git = Git::new(TIMEOUT);
 
-    // Freshen the stat cache first, so the index is in the state a plain
-    // `status` would want to update.
-    fixture.git(&fixture.repo, &["status", "--porcelain"]);
+    fixture.make_stat_cache_stale(&fixture.repo);
 
     let before = fingerprint(&fixture, &worktrees);
     let id = git
@@ -446,12 +492,14 @@ fn reporting_a_dirty_checkout_does_not_rewrite_its_index() {
     }
     let after = fingerprint(&fixture, &worktrees);
     assert_unchanged(&before, &after);
+    assert_no_scratch_indexes();
 }
 
 /// A worktree stopped mid-merge is the state most likely to be "helpfully"
 /// repaired by a tool that stages or writes trees. standup only reads it.
 #[test]
 fn a_worktree_mid_merge_is_reported_without_being_touched() {
+    let _serialised = scratch_guard();
     let fixture = Fixture::new("mid-merge-readonly");
     let mid = fixture.merge_in_progress_worktree("mid-merge");
     let worktrees = vec![fixture.repo.clone(), mid.clone()];
@@ -476,6 +524,7 @@ fn a_worktree_mid_merge_is_reported_without_being_touched() {
 /// lock or disturb its holder.
 #[test]
 fn a_run_is_safe_while_another_process_holds_the_index_lock() {
+    let _serialised = scratch_guard();
     let (fixture, worktrees) = kitchen_sink("locked");
     let git = Git::new(TIMEOUT);
 
@@ -526,6 +575,7 @@ fn a_run_is_safe_while_another_process_holds_the_index_lock() {
 
     let after = fingerprint(&fixture, &worktrees);
     assert_unchanged(&before, &after);
+    assert_no_scratch_indexes();
 
     for lock in &lock_paths {
         assert!(
@@ -550,6 +600,7 @@ fn a_run_is_safe_while_another_process_holds_the_index_lock() {
 /// fingerprinted separately from the contents.
 #[test]
 fn the_fingerprint_catches_the_writeback_that_no_optional_locks_prevents() {
+    let _serialised = scratch_guard();
     let fixture = Fixture::new("negative-control");
     for name in ["one.txt", "two.txt", "three.txt"] {
         fixture.write(&fixture.repo, name, "content\n");

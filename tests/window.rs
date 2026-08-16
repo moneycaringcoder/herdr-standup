@@ -375,6 +375,93 @@ fn the_first_run_of_since_last_falls_back_and_says_so_in_words() {
     );
 }
 
+/// Found by attacking the built binary. Every unreadable marker fell back to
+/// the default window and announced "no previous run on record" — word for word
+/// what a genuine first run says. A first run is normal; this is a fault, it
+/// will very likely repeat every day (`record_run` usually fails for the same
+/// reason), and the only trace was a line on stderr that nobody reads in an
+/// overlay pane.
+#[test]
+fn an_unreadable_marker_is_not_dressed_up_as_a_first_run() {
+    for (label, body) in [
+        ("zero bytes", ""),
+        ("an array", "[]"),
+        ("a bare string", "\"2026-08-01\""),
+        ("epoch as an object", "{\"epoch\":{}}"),
+        ("epoch as a string", "{\"epoch\":\"1786800000\"}"),
+        ("truncated", "{\"epoch\": "),
+    ] {
+        let state = StateDir::new();
+        let anchor = Anchor::new();
+        write_marker(&state, body);
+
+        let (window, notes) = window::resolve(
+            &git(),
+            &anchor.anchors(),
+            &date_ref_repo(&state),
+            &since_last_config(),
+        )
+        .unwrap_or_else(|err| panic!("{label} must not fail the digest: {err}"));
+
+        // The window itself is the same fallback a first run gets — there is no
+        // other honest answer, and `WindowSource` has no variant for this.
+        assert_eq!(window.source, WindowSource::SinceLastFirstRun, "{label}");
+
+        let warnings = warnings(&notes);
+        assert_eq!(warnings.len(), 1, "{label}: {notes:?}");
+        let message = &warnings[0].message;
+        assert!(
+            message.contains(&state.marker().display().to_string()),
+            "{label}: the warning must name the file to delete: {message}"
+        );
+        assert!(
+            !message.contains("no previous run on record"),
+            "{label}: this is not a first run: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_marker_that_is_a_directory_is_unreadable_rather_than_fatal() {
+    let state = StateDir::new();
+    let anchor = Anchor::new();
+    std::fs::create_dir_all(state.marker()).expect("marker directory");
+
+    let (window, notes) = window::resolve(
+        &git(),
+        &anchor.anchors(),
+        &date_ref_repo(&state),
+        &since_last_config(),
+    )
+    .expect("a directory where the marker goes must not fail the digest");
+
+    assert_eq!(window.source, WindowSource::SinceLastFirstRun);
+    assert_eq!(warnings(&notes).len(), 1, "{notes:?}");
+    // And recording is refused rather than silently losing the window.
+    window::record_run(&clock::stamp(clock::now()))
+        .expect_err("a directory cannot be replaced by a file");
+}
+
+/// A genuine first run keeps the calm wording: no warning, one plain note.
+#[test]
+fn a_genuine_first_run_is_still_only_an_info_note() {
+    let state = StateDir::new();
+    let anchor = Anchor::new();
+    assert!(!state.marker().exists());
+
+    let (_, notes) = window::resolve(
+        &git(),
+        &anchor.anchors(),
+        &date_ref_repo(&state),
+        &since_last_config(),
+    )
+    .expect("resolve");
+
+    assert!(warnings(&notes).is_empty(), "{notes:?}");
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].message.contains("no previous run on record"));
+}
+
 #[test]
 fn a_recorded_marker_starts_the_window_where_the_last_run_ended() {
     let state = StateDir::new();

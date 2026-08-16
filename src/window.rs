@@ -48,8 +48,8 @@ pub fn resolve(
     // Where the start comes from. Only `--since-last` with a marker on record
     // arrives as an instant already; everything else is a spec git must parse.
     let (source, recorded_start) = if config.since_last {
-        match previous_run() {
-            Some(previous) => {
+        match read_marker() {
+            MarkerState::At(previous) => {
                 // A marker ahead of the clock means the clock moved backwards or
                 // the state directory came out of a backup. Left alone it would
                 // render as a flawless empty digest, so it is refused by name.
@@ -72,13 +72,31 @@ pub fn resolve(
                     Some(start),
                 )
             }
-            None => {
+            MarkerState::Missing => {
                 // "You asked for today" and "this is the first run, so I fell
                 // back to today" must not look the same.
                 notes.push(Note::info(format!(
                     "--since-last has no previous run on record, so this digest covers \
                      the default window ({}) instead. The next --since-last will start \
                      where this run ends.",
+                    config.since
+                )));
+                (WindowSource::SinceLastFirstRun, None)
+            }
+            // A marker that exists and cannot be read is a third case, and the
+            // one most likely to mislead: the window falls back to the default
+            // exactly as a first run does, but a first run is normal and this is
+            // a fault. Reported as a warning in the digest rather than only on
+            // stderr, because the digest is what somebody reads in an overlay
+            // pane, and because `record_run` may well fail for the same reason
+            // and leave this repeating silently every day.
+            MarkerState::Unreadable(reason) => {
+                notes.push(Note::warning(format!(
+                    "the last-run marker {} exists but could not be read ({reason}), so this \
+                     digest covers the default window ({}) rather than everything since your \
+                     last one — it may repeat work you have already seen, or miss work older \
+                     than that. Delete that file to start the marker again.",
+                    config::last_run_file().display(),
                     config.since
                 )));
                 (WindowSource::SinceLastFirstRun, None)
@@ -211,27 +229,44 @@ struct Marker {
 /// and a `None`, never a hard failure: a mangled state file must not stop the
 /// digest from printing.
 pub fn previous_run() -> Option<Stamp> {
+    match read_marker() {
+        MarkerState::At(stamp) => Some(stamp),
+        MarkerState::Missing => None,
+        MarkerState::Unreadable(reason) => {
+            eprintln!(
+                "standup: ignoring the unreadable last-run marker {}: {reason}",
+                config::last_run_file().display()
+            );
+            None
+        }
+    }
+}
+
+/// What the marker file had to say.
+///
+/// Three states, not two, because "there has never been a run" and "there was
+/// one and I cannot read it" lead to the same window but are not the same
+/// answer to why. Every way of being unreadable lands in `Unreadable`: the file
+/// being a directory, being empty, holding JSON of the wrong type, or holding an
+/// `epoch` that is not a number. All four were tried against the built binary.
+enum MarkerState {
+    Missing,
+    Unreadable(String),
+    At(Stamp),
+}
+
+fn read_marker() -> MarkerState {
     let path = config::last_run_file();
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(err) => {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("standup: could not read {}: {err}", path.display());
-            }
-            return None;
-        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return MarkerState::Missing,
+        Err(err) => return MarkerState::Unreadable(err.to_string()),
     };
     match serde_json::from_str::<Marker>(&raw) {
         // Re-stamped rather than trusted verbatim, so the rendering is in the
         // zone the reader is in now.
-        Ok(marker) => Some(clock::stamp(marker.epoch)),
-        Err(err) => {
-            eprintln!(
-                "standup: ignoring the unreadable last-run marker {}: {err}",
-                path.display()
-            );
-            None
-        }
+        Ok(marker) => MarkerState::At(clock::stamp(marker.epoch)),
+        Err(err) => MarkerState::Unreadable(err.to_string()),
     }
 }
 

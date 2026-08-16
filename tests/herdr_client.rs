@@ -41,6 +41,11 @@ const CAPTURE: &str = include_str!("snapshots/session_snapshot.json");
 const FOREGROUND_TRAP: &str =
     "/home/dev/.local/share/mise/installs/node/24.18.0/lib/node_modules/pyright/dist";
 
+/// Comfortably past the client's `MAX_RESPONSE_BYTES`, which is 4 MiB. Kept as a
+/// number here rather than imported, so that raising the ceiling in the client
+/// without thinking about this test shows up as a failure.
+const OVER_THE_CEILING: usize = 5 * 1024 * 1024;
+
 fn captured() -> Value {
     serde_json::from_str(CAPTURE).expect("the captured fixture is JSON")
 }
@@ -79,6 +84,11 @@ enum Reply {
     /// Read the request and close without answering, which is what a client
     /// sees when it lands on a socket the server is tearing down.
     Eof,
+    /// One line that is over the client's ceiling, newline and all.
+    Oversize,
+    /// Bytes with no newline, for as long as the client keeps reading. A peer
+    /// stuck like this once took the process to 5.3 GB and got it killed.
+    Endless,
 }
 
 fn captured_reply() -> Reply {
@@ -131,6 +141,31 @@ impl TestServer {
                                     let _ = stream.write_all(reply.as_bytes());
                                     let _ = stream.write_all(b"\n");
                                     let _ = stream.flush();
+                                }
+                                Some(Reply::Oversize) => {
+                                    let mut stream = &stream;
+                                    let padding = vec![b'x'; 64 * 1024];
+                                    let _ = stream.write_all(b"{\"id\":\"standup:1\",\"pad\":\"");
+                                    for _ in 0..(OVER_THE_CEILING / padding.len()) {
+                                        if stream.write_all(&padding).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    let _ = stream.write_all(b"\"}\n");
+                                    let _ = stream.flush();
+                                }
+                                Some(Reply::Endless) => {
+                                    // No newline, ever. Stops only when the
+                                    // client gives up and closes on us, which is
+                                    // the behaviour under test.
+                                    let mut stream = &stream;
+                                    let padding = vec![b'y'; 64 * 1024];
+                                    let _ = stream.write_all(b"{\"pad\":\"");
+                                    while !stop.load(Ordering::SeqCst) {
+                                        if stream.write_all(&padding).is_err() {
+                                            break;
+                                        }
+                                    }
                                 }
                                 // Exhausted or an explicit EOF: just close, the
                                 // way herdr closes after answering.
@@ -331,6 +366,57 @@ fn a_response_with_neither_result_nor_error_is_a_transport_failure() {
         err.to_string().contains("neither result nor error"),
         "{err}"
     );
+}
+
+/// The regression test for an out-of-memory kill. The framing is
+/// newline-delimited, so a peer that never sends a newline is a peer that never
+/// stops; reading that into an unbounded `String` grew the real binary to 5.3 GB
+/// in thirteen seconds and had it killed by signal 9. It must be a bounded,
+/// named failure instead.
+#[test]
+fn a_response_with_no_end_of_line_is_given_up_on_rather_than_read_forever() {
+    let _guard = env_lock();
+    let server = TestServer::start(vec![Reply::Endless, Reply::Endless]);
+    let mut client = server.client();
+
+    let err = client
+        .workspaces()
+        .expect_err("a peer that never stops talking must not be humoured");
+
+    let message = err.to_string();
+    assert!(message.contains("past the"), "{message}");
+    assert_eq!(
+        error_code(&*err),
+        None,
+        "this is the transport failing, not herdr refusing"
+    );
+}
+
+#[test]
+fn a_single_line_over_the_ceiling_is_refused() {
+    let _guard = env_lock();
+    let server = TestServer::start(vec![Reply::Oversize, Reply::Oversize]);
+    let mut client = server.client();
+
+    let err = client.workspaces().expect_err("over the ceiling");
+
+    assert!(err.to_string().contains("past the"), "{err}");
+    assert_eq!(
+        server.requests().len(),
+        2,
+        "an oversized reply is a transport failure, so it is retried once"
+    );
+}
+
+/// A reply that fits is still read whole — the ceiling must not be so eager
+/// that it truncates a large but ordinary session.
+#[test]
+fn a_reply_well_under_the_ceiling_is_read_normally() {
+    let _guard = env_lock();
+    let server = TestServer::start(vec![captured_reply()]);
+    let mut client = server.client();
+
+    assert_eq!(client.workspaces().expect("snapshot").len(), 10);
 }
 
 #[test]
@@ -570,6 +656,49 @@ fn a_dot_component_in_a_reported_path_is_dropped() {
         workspace(&workspaces, "w15").paths,
         vec![PathBuf::from("/home/dev/code/atlas")],
         "the tidied path must also collapse with the other three panes' cwds"
+    );
+}
+
+/// Found by running the real binary against the live session. A workspace whose
+/// directory had been removed underneath it reported `worktree.checkout_path` as
+/// the directory and its pane's `cwd` as the same directory plus the kernel's
+/// `(deleted)` marker. Those reduced to two candidate paths, and the digest
+/// printed the same "is not a git checkout" note twice — both lines truncated at
+/// the same column, so they read as an exact duplicate.
+#[test]
+fn a_deleted_cwd_does_not_become_a_second_directory() {
+    let mut snapshot = captured_snapshot();
+    // wE is the workspace with a `worktree`; its two panes sit in the checkout.
+    snapshot["panes"][3]["cwd"] =
+        json!("/home/dev/.herdr/worktrees/orchard/fix-slow-fetch (deleted)");
+    snapshot["panes"][4]["cwd"] =
+        json!("/home/dev/.herdr/worktrees/orchard/fix-slow-fetch (deleted)");
+
+    let workspaces = reduce_snapshot(&snapshot);
+
+    assert_eq!(
+        workspace(&workspaces, "wE").paths,
+        vec![PathBuf::from(
+            "/home/dev/.herdr/worktrees/orchard/fix-slow-fetch"
+        )],
+        "the marker is the kernel's annotation, not a different directory"
+    );
+}
+
+#[test]
+fn a_deleted_cwd_is_still_reported_when_it_is_the_only_thing_there_is() {
+    // No `worktree` key on w15, and every pane marked deleted: the digest must
+    // still name the directory, under the name the user would recognise.
+    let mut snapshot = captured_snapshot();
+    for pane in 7..=10 {
+        snapshot["panes"][pane]["cwd"] = json!("/home/dev/code/atlas (deleted)");
+    }
+
+    let workspaces = reduce_snapshot(&snapshot);
+
+    assert_eq!(
+        workspace(&workspaces, "w15").paths,
+        vec![PathBuf::from("/home/dev/code/atlas")]
     );
 }
 
