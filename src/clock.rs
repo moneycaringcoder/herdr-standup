@@ -22,8 +22,13 @@ pub fn now() -> i64 {
 
 /// An epoch second, rendered in the local zone.
 pub fn stamp(epoch: i64) -> Stamp {
-    let (local, zone) = format_local(epoch);
-    Stamp { epoch, local, zone }
+    let (local, zone, offset_seconds) = format_local(epoch);
+    Stamp {
+        epoch,
+        local,
+        zone,
+        offset_seconds,
+    }
 }
 
 /// Local midnight at the start of the day containing `epoch`.
@@ -88,10 +93,14 @@ fn days_before(epoch: i64, days: i64) -> i64 {
     midnight(noon)
 }
 
-/// `("2026-08-15 09:12", "CEST +0200")`.
-fn format_local(epoch: i64) -> (String, String) {
+/// `("2026-08-15 09:12", "CEST +0200", Some(7200))`.
+///
+/// The offset is returned as a number as well as printed into `zone`, because
+/// the printed form is for a header and the number is for the JSON. Both come
+/// from the same `tm_gmtoff`, so they cannot disagree.
+fn format_local(epoch: i64) -> (String, String, Option<i64>) {
     let Some(tm) = civil(epoch) else {
-        return (format!("epoch {epoch}"), "unknown zone".to_string());
+        return (format!("epoch {epoch}"), "unknown zone".to_string(), None);
     };
     let local = format!(
         "{:04}-{:02}-{:02} {:02}:{:02}",
@@ -101,17 +110,20 @@ fn format_local(epoch: i64) -> (String, String) {
         tm.tm_hour,
         tm.tm_min
     );
+    // `tm_gmtoff` is a `c_long`, which is `i64` on every target this plugin
+    // declares. A 32-bit target would fail to compile here rather than
+    // truncate quietly, which is the right way round.
+    let seconds: i64 = tm.tm_gmtoff;
     let offset = {
-        let total = tm.tm_gmtoff;
-        let sign = if total < 0 { '-' } else { '+' };
-        let abs = total.abs();
+        let sign = if seconds < 0 { '-' } else { '+' };
+        let abs = seconds.abs();
         format!("{sign}{:02}{:02}", abs / 3_600, (abs % 3_600) / 60)
     };
     let zone = match zone_name(&tm) {
         Some(name) => format!("{name} {offset}"),
         None => offset,
     };
-    (local, zone)
+    (local, zone, Some(seconds))
 }
 
 #[cfg(unix)]
@@ -282,6 +294,65 @@ mod tests {
         let offset = stamp.zone.rsplit(' ').next().unwrap();
         assert_eq!(offset.len(), 5, "malformed offset in {:?}", stamp.zone);
         assert!(offset.starts_with('+') || offset.starts_with('-'));
+    }
+
+    /// The two halves of the same fact must agree: `zone` is what a reader sees
+    /// and `offset_seconds` is what a script reads, and a digest whose prose said
+    /// `+0200` while its number said `0` would put every commit two hours out for
+    /// exactly one of them.
+    #[test]
+    fn the_offset_matches_the_zone_it_prints() {
+        for probe in [
+            0_i64,
+            1_786_831_294,
+            1_600_000_000,
+            2_000_000_000,
+            // Either side of a European DST transition, where the same host
+            // legitimately reports two different offsets.
+            1_761_440_000,
+            1_761_440_000 + 7 * 86_400,
+        ] {
+            let stamp = stamp(probe);
+            let Some(seconds) = stamp.offset_seconds else {
+                assert_eq!(
+                    stamp.zone, "unknown zone",
+                    "an absent offset must be the no-zone case, not a silent zero"
+                );
+                continue;
+            };
+            // Rebuilt from the number, and compared with the printed form, so
+            // neither can drift from the other.
+            let sign = if seconds < 0 { '-' } else { '+' };
+            let abs = seconds.abs();
+            let expected = format!("{sign}{:02}{:02}", abs / 3_600, (abs % 3_600) / 60);
+            assert!(
+                stamp.zone.ends_with(&expected),
+                "offset {seconds} does not match the printed zone {:?}",
+                stamp.zone
+            );
+        }
+    }
+
+    /// A whole-hour zone is the common case and the easy one to get right; the
+    /// point here is the offsets that are not whole hours, because seconds is the
+    /// only unit that can carry them.
+    #[test]
+    fn a_fractional_offset_survives_as_seconds() {
+        // Runs under whatever zone the host has, so the assertion is about the
+        // unit rather than a value: an offset expressible only in minutes must
+        // not have been rounded to an hour on the way into the JSON.
+        let stamp = stamp(1_786_831_294);
+        if let Some(seconds) = stamp.offset_seconds {
+            assert_eq!(
+                seconds.abs() % 60,
+                0,
+                "no zone has a sub-minute offset: {seconds}"
+            );
+            assert!(
+                seconds.abs() <= 16 * 3_600,
+                "offset outside the range any zone uses: {seconds}"
+            );
+        }
     }
 
     #[test]

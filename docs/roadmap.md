@@ -9,12 +9,6 @@ A feature that cannot meet that does not belong here.
 
 ## Interfaces
 
-### An explicit timezone in the JSON
-
-Commit times are rendered in local time, which is right for a person reading a
-digest and ambiguous for a machine consuming one. The JSON should carry the zone
-rather than leave the consumer to assume.
-
 ### A versioned JSON schema
 
 The JSON is documented as being for scripting. A schema version, and a changelog

@@ -16,7 +16,7 @@ use std::time::Duration;
 use standup::clock;
 use standup::config::{self, Config};
 use standup::git::Git;
-use standup::model::{Note, Period, Severity, Stamp, WindowSource};
+use standup::model::{Note, Period, Severity, WindowSource};
 use standup::window;
 
 /// `HERDR_PLUGIN_STATE_DIR` is process-global, so these tests run one at a
@@ -478,14 +478,13 @@ fn a_recorded_marker_starts_the_window_where_the_last_run_ended() {
     .expect("resolve");
 
     assert_eq!(window.since.epoch, previous.epoch);
+    // The whole stamp, not field by field: a marker that came back with a
+    // different offset than the run that wrote it would be a different instant
+    // wearing the same epoch.
     assert_eq!(
         window.source,
         WindowSource::SinceLast {
-            previous_run: Stamp {
-                epoch: previous.epoch,
-                local: previous.local.clone(),
-                zone: previous.zone.clone(),
-            }
+            previous_run: previous.clone()
         }
     );
     assert!(notes.is_empty(), "nothing to explain: {notes:?}");

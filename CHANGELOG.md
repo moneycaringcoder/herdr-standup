@@ -8,6 +8,25 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- Every timestamp in the JSON carries `offset_seconds`: the seconds east of UTC
+  that its `local` string was rendered in. `zone` stays as it was — prose, for a
+  header — and this is the same fact as a number, so a consumer no longer has to
+  parse `CEST +0200` or assume.
+
+  It is per timestamp rather than once per digest, because a window can span a
+  daylight-saving change: a `--monthly` digest of March legitimately holds stamps
+  at `+0100` and `+0200`, and a single zone field at the top would be wrong for
+  half of them. `null` only where no local zone could be resolved at all, which
+  is the same case that makes `local` read `epoch <n>` — an absent offset and an
+  offset of zero are not the same answer.
+
+  `epoch + offset_seconds` reproduces `local` exactly, asserted under six zones
+  including the half-hour and three-quarter-hour ones, with the calendar
+  arithmetic written a second time in the test so one bug cannot produce both
+  sides of the comparison. The human digests are unchanged, which is also
+  asserted. `SCHEMA_VERSION` stays at 1, as with the earlier additive changes,
+  since the roadmap versions the schema last.
+
 - The landing probes are cached, keyed on the shas that determine them. On a
   purpose-built repository — 800 trunk commits, twelve worktrees, 16.5 MB of
   patch text — a run went from 3.64 s to 1.49 s cold and 0.39 s warm, with a
