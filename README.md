@@ -424,6 +424,33 @@ mtime while leaving its byte length identical, which is why mtime is fingerprint
 There are also **no network calls at all** — no GitHub API, no telemetry, no update check. The digest
 works on a plane.
 
+The one thing standup does write is its own state, in
+`~/.local/state/herdr/plugins/moneycaringcoder.standup/`: the `--since-last` marker, and a cache of
+the landing probes.
+
+## The cache
+
+Answering "did it land?" for a branch that is not an ancestor of the trunk costs a walk of the trunk
+range — `git log -p` over 800 commits is about 140 MB of patch text — and a session is many worktrees
+of one repository, so that walk used to be paid once per checkout.
+
+It is now cached, because both probes are pure functions of shas: the verdict is keyed on the head
+sha, the trunk's name and the trunk's sha, and the expensive trunk range is keyed on the fork point
+and the trunk sha, which is the same key for every worktree branched from one commit of a trunk that
+has not moved. On a purpose-built repository — 800 trunk commits, twelve worktrees, 16.5 MB of patch
+text — a run went from **3.64 s to 1.49 s cold and 0.39 s warm**, and produced a byte-identical
+digest each time.
+
+There is no expiry and nothing to invalidate. Anything that could change an answer moves a sha, and a
+moved sha is a different key, so **a checkout that moved cannot be served a stale verdict**. A
+failure is never stored — git failing once must not become permanent — and the file carries a version
+that is bumped whenever the probes change, so an answer produced by code that no longer exists is
+discarded rather than trusted.
+
+Deleting the file is always safe; it costs one slow run. A cache that made the answer depend on
+whether it was there would not be worth having, so a hit and a miss are asserted to produce the same
+report.
+
 ## Install
 
 ```sh

@@ -494,6 +494,12 @@ pub fn last_run_file() -> PathBuf {
     state_dir().join("last-run.json")
 }
 
+/// The plumbing cache, beside the marker. Not a config file: it holds only
+/// answers the plugin can recompute, and deleting it costs one slow run.
+pub fn cache_file() -> PathBuf {
+    state_dir().join("plumbing-cache.json")
+}
+
 /// A throwaway repository used only to resolve `--since` strings through git's
 /// own approxidate parser when the session has no checkouts of its own. Empty,
 /// bare, and never written to by anything but `git init`.
