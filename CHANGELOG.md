@@ -8,6 +8,23 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **Committed but unpushed work is its own state.** The digest already separated
+  "the agent did nothing" from "the agent did a day of work and never committed
+  it"; the state between them — committed here, on no remote, gone with the
+  directory — was left to be inferred from an `ahead` count that is not even
+  reported when there is no upstream configured, and a checkout holding nothing
+  else was filed as quiet, summarised down to its repository name, and dropped
+  altogether when quiet repositories were excluded. It now reads as
+  `unpushed: 2 commits on no remote`, on its own line beside `uncommitted:`,
+  and such a checkout is never called quiet. The question asked is
+  `git rev-list --count HEAD --not --remotes` — reachable from HEAD and from no
+  remote-tracking ref — so work pushed to a fork or a second remote is correctly
+  not counted as at risk, and a branch with no upstream is answered rather than
+  skipped. A repository with **no remote at all** is reported as having nowhere
+  to push rather than as holding its whole history at risk, because filing every
+  local-only scratch repository under "at risk" would bury the case worth
+  reading. A count that cannot be read is a named problem, never a reassuring
+  zero.
 - Tag-triggered release automation. Pushing `vX.Y.Z` runs the full suite on
   Linux and macOS and publishes the GitHub release with notes taken from that
   version's changelog section — but only after an identity gate has confirmed

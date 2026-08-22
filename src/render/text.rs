@@ -162,6 +162,11 @@ fn checkout_block(
             &checkout_clauses(report, REF_COLUMNS).join(", "),
         ),
     }
+    // Lifecycle order, which is also fragility order: what was committed, what
+    // is committed but only here, what is not committed at all.
+    if let Some(unpushed) = unpushed_sentence(&report.unpushed) {
+        wrapped(out, "      ", "        ", &unpushed);
+    }
     if let Some(dirty) = dirty_sentence(&report.dirty) {
         wrapped(out, "      ", "        ", &dirty);
     }

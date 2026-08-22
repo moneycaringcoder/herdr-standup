@@ -148,6 +148,9 @@ fn repo_bullets(out: &mut String, repo: &RepoDigest, config: &Config, with_date:
         if let Some((label, who)) = attribution(checkout) {
             item(out, 4, &format!("{label}: {}", esc(&who)));
         }
+        if let Some(unpushed) = unpushed_sentence(&report.unpushed) {
+            item(out, 4, &esc(&unpushed));
+        }
         if let Some(dirty) = dirty_sentence(&report.dirty) {
             item(out, 4, &esc(&dirty));
         }

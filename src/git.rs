@@ -98,7 +98,7 @@ use crate::clock;
 use crate::config::DEFAULT_BRANCH_CANDIDATES;
 use crate::model::{
     CheckoutReport, Churn, Commit, Dirty, Equivalence, Head, Landed, RepoKey, Stamp, Tracking,
-    Window,
+    Unpushed, Window,
 };
 use crate::Result;
 
@@ -377,6 +377,7 @@ impl Git {
         let dirty = self.dirty(&path, git_dir.as_deref(), &mut problems);
         let tracking = self.tracking(&path, &head, &mut problems);
         let landed = self.landed(&path, &head, &mut problems);
+        let unpushed = self.unpushed(&path, &head, &mut problems);
 
         CheckoutReport {
             path,
@@ -389,6 +390,7 @@ impl Git {
             dirty,
             tracking,
             landed,
+            unpushed,
             problems,
         }
     }
@@ -813,6 +815,86 @@ impl Git {
                 Tracking::UpstreamMissing { name: upstream }
             }
             None => Tracking::UpstreamMissing { name: upstream },
+        }
+    }
+
+    /// The commits that exist in this checkout and **nowhere else**.
+    ///
+    /// ```sh
+    /// git -C <wt> --no-optional-locks remote
+    /// git -C <wt> --no-optional-locks rev-list --count HEAD --not --remotes
+    /// ```
+    ///
+    /// Reachable from HEAD, reachable from no remote-tracking ref. That is the
+    /// question, rather than the `ahead` count [`Git::tracking`] already
+    /// reports, for two reasons: `ahead` is measured against the **one**
+    /// configured upstream, and it answers nothing at all when there is no
+    /// upstream — which is precisely the branch whose every commit is only here.
+    /// `--remotes` spans every remote, so work pushed to a fork or to a second
+    /// remote is correctly not counted as at risk.
+    ///
+    /// The `remote` call first is not a formality. Without it, a repository with
+    /// no remote configured counts its entire history as unpushed, which is
+    /// literally true and useless: there was never anywhere to push it, and a
+    /// digest that files every local-only scratch repository under "work at
+    /// risk" buries the case this exists to surface. That state gets its own
+    /// name instead.
+    fn unpushed(&self, path: &Path, head: &Head, problems: &mut Vec<String>) -> Unpushed {
+        // An unborn branch has no commits, so nothing can be unpushed, and
+        // `rev-list` would fail on the missing HEAD. Not a fault worth naming.
+        if head.oid().filter(|oid| !oid.is_empty()).is_none() {
+            return Unpushed::Commits { count: 0 };
+        }
+
+        // A failure here is recorded as a problem as well as a state, which is
+        // what `tracking` does with a dangling upstream and for the same reason:
+        // a checkout whose at-risk count could not be read must not be filed as
+        // quiet and summarised down to its repository name. `problems` is the
+        // one field every renderer is obliged to show.
+
+        match self.capture(path, &["remote"], problems) {
+            Some(out) if out.ok() => {
+                if out.stdout_text().is_empty() {
+                    return Unpushed::NoRemote;
+                }
+            }
+            Some(out) => {
+                return unpushed_unknown(
+                    format!(
+                        "git remote exited {}: {}",
+                        exit_label(out.code),
+                        out.stderr_text()
+                    ),
+                    problems,
+                )
+            }
+            None => return unpushed_unknown("git remote could not be run".to_string(), problems),
+        }
+
+        let Some(out) = self.capture(
+            path,
+            &["rev-list", "--count", "HEAD", "--not", "--remotes"],
+            problems,
+        ) else {
+            return unpushed_unknown("git rev-list could not be run".to_string(), problems);
+        };
+        if !out.ok() {
+            return unpushed_unknown(
+                format!(
+                    "git rev-list exited {}: {}",
+                    exit_label(out.code),
+                    out.stderr_text()
+                ),
+                problems,
+            );
+        }
+        let text = out.stdout_text();
+        match text.parse() {
+            Ok(count) => Unpushed::Commits { count },
+            Err(err) => unpushed_unknown(
+                format!("git rev-list --count answered {text:?}: {err}"),
+                problems,
+            ),
         }
     }
 
@@ -1614,6 +1696,21 @@ fn is_executable(path: &Path) -> bool {
 fn exit_label(code: Option<i32>) -> String {
     code.map(|code| code.to_string())
         .unwrap_or_else(|| "on a signal".to_string())
+}
+
+/// An unreadable at-risk count, recorded twice on purpose.
+///
+/// The state carries the reason for the JSON, and `problems` carries it for the
+/// renderers — which is not belt and braces. A checkout whose count could not be
+/// read has nothing to put on its `unpushed:` line, so without a problem beside
+/// it the checkout is quiet, and a quiet repository is summarised to its name and
+/// dropped altogether when quiet ones are excluded. The failure would be
+/// invisible in exactly the digest that needed it.
+fn unpushed_unknown(reason: String, problems: &mut Vec<String>) -> Unpushed {
+    problems.push(format!(
+        "could not count the commits that exist only here: {reason}"
+    ));
+    Unpushed::Unknown { reason }
 }
 
 /// Splices [`PATCH_ID_DIFF_OPTIONS`] into a diff-producing command.
