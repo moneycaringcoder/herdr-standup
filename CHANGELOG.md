@@ -8,6 +8,24 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- `--weekly` and `--monthly`: the same data, aggregated rather than listed. The
+  window options answer "what happened today"; these answer "what happened this
+  month", which is the version somebody forwards. The commit lines go, the totals
+  stay, and each repository gains the number a long window needs — `over 4 active
+  days`, because "37 commits" is a very different month depending on whether it
+  was four days or one. A daily digest does not print it, where the answer is
+  always one.
+
+  Both boundaries are **calendar** rather than rolling: "the last thirty days" is
+  a different question from "this month". The week starts on Monday, which is ISO
+  8601's answer rather than the locale's, so the same command means the same
+  window on two machines. Both are computed from `localtime_r` rather than handed
+  to git's approxidate parser, which cannot be asked for a calendar boundary
+  exactly, and both are printed as an absolute instant so the boundary can be
+  checked rather than trusted. Verified across UTC, the half-hour zones, +14 and
+  −3:30, and across a DST transition. A rollup sets its own window, so `--since`,
+  `--until` and `--since-last` are refused alongside it by name rather than one
+  of them quietly winning.
 - A broader CI matrix, and a red row that says which kind of thing broke. Five
   rows now — Linux and macOS, arm64 and x86_64, three runner images — plus a row
   that takes git from `ppa:git-core/ppa` rather than the image, so a git newer

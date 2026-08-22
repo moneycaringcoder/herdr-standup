@@ -79,6 +79,41 @@ pub enum WindowSource {
     /// `--since-last` with no previous run recorded — first use, or a wiped
     /// state directory. Falls back to the default window and says so.
     SinceLastFirstRun,
+    /// `--weekly` or `--monthly`: a calendar period, resolved from the local
+    /// zone rather than parsed by git, and aggregated rather than listed.
+    Rollup { period: Period },
+}
+
+/// A calendar period a rollup covers.
+///
+/// Calendar rather than rolling, because "what happened this month" is the
+/// question people forward to each other, and "the last thirty days" is not the
+/// same question. The boundary is computed from `localtime_r` and printed as an
+/// absolute instant, so it can be checked rather than trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Period {
+    /// Monday to now. ISO 8601's week start, stated rather than taken from the
+    /// locale, so the same command means the same window on two machines.
+    Week,
+    /// The first of the month to now.
+    Month,
+}
+
+impl Period {
+    pub fn flag(self) -> &'static str {
+        match self {
+            Period::Week => "--weekly",
+            Period::Month => "--monthly",
+        }
+    }
+
+    pub fn noun(self) -> &'static str {
+        match self {
+            Period::Week => "week",
+            Period::Month => "month",
+        }
+    }
 }
 
 /// The reporting period, resolved to absolute instants before any git command
@@ -540,6 +575,14 @@ pub struct RepoDigest {
     /// visible from two worktrees of one repo is counted once.
     pub commits: usize,
     pub churn: Churn,
+    /// Distinct local days on which at least one of those commits was made.
+    ///
+    /// The number a long window needs and a daily one does not: "34 commits" is
+    /// a very different month depending on whether it was nine days or one. One
+    /// git command away, like everything else here —
+    /// `git log --since-as-filter=@<since> --date=format-local:%F --format=%cd
+    /// | sort -u | wc -l`.
+    pub active_days: usize,
 }
 
 impl RepoDigest {

@@ -127,6 +127,7 @@ pub fn build(config: &Config) -> Result<Digest> {
                 checkouts: Vec::new(),
                 commits: 0,
                 churn: Churn::default(),
+                active_days: 0,
             });
         entry.checkouts.push(CheckoutDigest {
             report,
@@ -361,6 +362,7 @@ fn merge_checkout(
 fn rollup(repo: &mut RepoDigest, ignored: &Ignored) {
     let mut seen_commits: Vec<&str> = Vec::new();
     let mut files: Vec<&str> = Vec::new();
+    let mut days: Vec<&str> = Vec::new();
     let mut churn = Churn::default();
     for checkout in &repo.checkouts {
         for commit in &checkout.report.commits {
@@ -370,6 +372,18 @@ fn rollup(repo: &mut RepoDigest, ignored: &Ignored) {
             seen_commits.push(&commit.oid);
             churn.insertions += commit.insertions;
             churn.deletions += commit.deletions;
+            // The local date out of the rendered stamp, which is already
+            // formatted through `localtime_r`: the day this commit belongs to is
+            // the day a reader would see beside it, not a UTC one.
+            let day = commit
+                .committed
+                .local
+                .split(' ')
+                .next()
+                .unwrap_or(&commit.committed.local);
+            if !days.contains(&day) {
+                days.push(day);
+            }
             for file in &commit.files {
                 if !files.contains(&file.as_str()) {
                     files.push(file);
@@ -380,6 +394,7 @@ fn rollup(repo: &mut RepoDigest, ignored: &Ignored) {
     churn.files = files.len();
     churn.excluded = files.iter().filter(|file| ignored.matches(file)).count();
     repo.commits = seen_commits.len();
+    repo.active_days = days.len();
     repo.churn = churn;
 }
 

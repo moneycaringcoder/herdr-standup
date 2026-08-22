@@ -63,8 +63,9 @@ pub fn markdown(digest: &Digest, config: &Config) -> String {
             ),
         );
         let with_date = dates_needed(digest);
+        let list_commits = lists_commits(&digest.window);
         for repo in &busy {
-            repo_bullets(&mut out, repo, config, with_date);
+            repo_bullets(&mut out, repo, config, with_date, list_commits);
         }
         out.push('\n');
     }
@@ -99,13 +100,27 @@ fn header(out: &mut String, digest: &Digest) {
     }
 }
 
-fn repo_bullets(out: &mut String, repo: &RepoDigest, config: &Config, with_date: bool) {
+fn repo_bullets(
+    out: &mut String,
+    repo: &RepoDigest,
+    config: &Config,
+    with_date: bool,
+    list_commits: bool,
+) {
     out.push_str(&format!(
-        "- **{}** \u{2014} {}\n",
+        "- **{}** \u{2014} {}",
         esc(&repo.name),
         stats(repo.commits, repo.churn)
     ));
-
+    // Only worth saying over a window longer than a day, where "34 commits" is a
+    // very different month depending on whether it was nine days or one.
+    if !list_commits && repo.active_days > 0 {
+        out.push_str(&format!(
+            " \u{2014} over {}",
+            quantity(repo.active_days, "active day", "active days")
+        ));
+    }
+    out.push('\n');
     for checkout in sorted_checkouts(repo) {
         let report = &checkout.report;
 
@@ -155,7 +170,11 @@ fn repo_bullets(out: &mut String, repo: &RepoDigest, config: &Config, with_date:
             item(out, 4, &esc(&dirty));
         }
 
-        commit_items(out, report, config, with_date);
+        // A rollup aggregates rather than lists. A month of commits printed one
+        // per line is a `git log` with extra steps.
+        if list_commits {
+            commit_items(out, report, config, with_date);
+        }
     }
 }
 

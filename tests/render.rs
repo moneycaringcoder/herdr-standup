@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use standup::config::{Config, Ignored};
 use standup::model::{
     AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Equivalence, Head,
-    Landed, Note, RepoDigest, RepoKey, Stamp, Tracking, Unpushed, Window, WindowSource,
+    Landed, Note, Period, RepoDigest, RepoKey, Stamp, Tracking, Unpushed, Window, WindowSource,
     WorkspaceRef, SCHEMA_VERSION,
 };
 use standup::render::{json, markdown, text};
@@ -229,6 +229,22 @@ fn repo(name: &str, checkouts: Vec<CheckoutDigest>) -> RepoDigest {
         .iter()
         .filter(|file| Ignored::default().matches(file))
         .count();
+    // Also the same rule: distinct local days, out of the stamps a reader sees.
+    let mut days: Vec<String> = Vec::new();
+    for checkout in &checkouts {
+        for commit in &checkout.report.commits {
+            let day = commit
+                .committed
+                .local
+                .split(' ')
+                .next()
+                .unwrap_or(&commit.committed.local)
+                .to_string();
+            if !days.contains(&day) {
+                days.push(day);
+            }
+        }
+    }
     RepoDigest {
         repo_key: RepoKey(format!("/repos/{name}/.git")),
         name: name.to_string(),
@@ -236,6 +252,7 @@ fn repo(name: &str, checkouts: Vec<CheckoutDigest>) -> RepoDigest {
         checkouts,
         commits: seen.len(),
         churn,
+        active_days: days.len(),
     }
 }
 
@@ -990,6 +1007,109 @@ fn a_checkout_with_nothing_excluded_says_nothing_about_it() {
     let flat = flatten(&plain(&digest));
     // Not the bare word: the header legitimately says "generated 09:12".
     assert!(!flat.contains(" generated)"), "{flat}");
+}
+
+/// A rollup aggregates rather than lists. That is the whole request in #11, and
+/// the difference between a digest somebody forwards and a `git log`.
+#[test]
+fn a_rollup_aggregates_instead_of_listing_the_commits() {
+    let report = with_commits(
+        checkout("/repos/app/w", "feature/one"),
+        vec![
+            commit(
+                "1111000111110001111100011111000111110001",
+                "2026-08-13 08:00",
+                1_785_830_400,
+                "First day",
+                &["a.rs"],
+            ),
+            commit(
+                "2222000222220002222200022222000222220002",
+                "2026-08-15 09:00",
+                1_786_032_000,
+                "Third day",
+                &["b.rs"],
+            ),
+        ],
+    );
+    let repos = vec![repo("app", vec![alone(report)])];
+
+    let listed = digest(repos.clone(), Vec::new());
+    let rolled = Digest {
+        window: Window {
+            source: WindowSource::Rollup {
+                period: Period::Month,
+            },
+            ..today()
+        },
+        ..digest(repos, Vec::new())
+    };
+
+    for rendered in [plain(&listed), md(&listed)] {
+        assert!(
+            flatten(&rendered).contains("First day"),
+            "a daily digest lists its commits:\n{rendered}"
+        );
+    }
+    for rendered in [plain(&rolled), md(&rolled)] {
+        let flat = flatten(&rendered);
+        assert!(
+            !flat.contains("First day") && !flat.contains("Third day"),
+            "a rollup must not list commits one per line:\n{rendered}"
+        );
+        // The totals are still there — aggregated, not dropped.
+        assert!(flat.contains("2 commits"), "{rendered}");
+        assert!(
+            flat.contains("over 2 active days"),
+            "the number a long window needs:\n{rendered}"
+        );
+    }
+}
+
+/// And a daily digest says nothing about active days, where the answer is always
+/// one and the line would be noise.
+#[test]
+fn a_daily_digest_does_not_count_active_days() {
+    let report = with_commits(
+        checkout("/repos/app/w", "feature/one"),
+        vec![commit(
+            "3333000333330003333300033333000333330003",
+            "2026-08-15 08:00",
+            1_786_028_400,
+            "Work",
+            &["a.rs"],
+        )],
+    );
+    let digest = digest(vec![repo("app", vec![alone(report)])], Vec::new());
+
+    assert!(!flatten(&plain(&digest)).contains("active day"));
+    assert!(!flatten(&md(&digest)).contains("active day"));
+}
+
+/// The header says which boundary it used, because a reader who disagrees about
+/// when a week starts needs to know which Monday this is.
+#[test]
+fn a_rollup_says_which_calendar_boundary_it_used() {
+    for (period, expected) in [
+        (Period::Week, "this ISO week, Monday to now"),
+        (Period::Month, "this calendar month, the 1st to now"),
+    ] {
+        let rolled = Digest {
+            window: Window {
+                source: WindowSource::Rollup { period },
+                ..today()
+            },
+            ..digest(
+                vec![repo("app", vec![alone(checkout("/repos/app", "main"))])],
+                Vec::new(),
+            )
+        };
+        let flat = flatten(&plain(&rolled));
+        assert!(flat.contains(expected), "{flat}");
+        // And the resolved instant is still on the line above it, so the
+        // boundary can be checked rather than trusted.
+        assert!(flat.contains("2026-08-15 00:00"), "{flat}");
+    }
 }
 
 #[test]
