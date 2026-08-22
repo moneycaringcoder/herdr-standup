@@ -8,6 +8,28 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- A broader CI matrix, and a red row that says which kind of thing broke. Five
+  rows now — Linux and macOS, arm64 and x86_64, three runner images — plus a row
+  that takes git from `ppa:git-core/ppa` rather than the image, so a git newer
+  than any distro ships is exercised the day it lands. git 2.55 redefined
+  `--since today` from the current instant to local midnight and nothing in CI
+  would have caught it in advance. Measured on the first run: all five rows are
+  currently git 2.55.0, so the matrix buys operating-system and architecture
+  coverage today rather than git-version coverage, and the PPA row is there to
+  diverge when the next release appears.
+- `tests/git_contract.rs`, a test target that asserts what **git** does with no
+  plugin code in the way: the `diff` index writeback that `--no-optional-locks`
+  does not cover, `--max-age` pruning where `--since-as-filter` does not,
+  `rev-parse --since=<garbage>` exiting 0 and answering now, `patch-id` agreeing
+  between plumbing and porcelain under the pinned diff options,
+  `rev-list --not --remotes`, the binary `--numstat` spelling, and
+  `symbolic-ref` still being unable to tell an unborn branch from a deleted one.
+  Every one is a claim `docs/git-plumbing.md` already made; this makes the notes
+  executable. It runs first and on its own, so a failure there means the
+  environment moved and a failure after it means the plugin is wrong — a
+  distinction that cost more than fixing either the first time round. Each row
+  also prints its git version and what that git makes of `today`, `midnight` and
+  garbage before anything can fail.
 - **Generated and vendored paths no longer distort the line counts.** Lines added
   and removed are a proxy for effort, and one regenerated lockfile destroys it:
   a `pnpm-lock.yaml` churns tens of thousands of lines nobody wrote. Paths

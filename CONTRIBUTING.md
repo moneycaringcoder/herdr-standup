@@ -68,9 +68,33 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --all
 ```
 
-CI runs exactly these on Linux and macOS with the current stable toolchain. If
-your local Rust is older than CI's, clippy will pass locally and fail there —
-`rustup update stable` first if in doubt.
+CI runs these on a matrix of five rows: Linux and macOS, arm64 and x86_64, and
+three different runner images, plus one row that installs git from
+`ppa:git-core/ppa` rather than taking the image's. If your local Rust is older
+than CI's, clippy will pass locally and fail there — `rustup update stable`
+first if in doubt.
+
+**Every row currently runs git 2.55.0**, measured, including the PPA one: the
+images have converged on the newest stable release. So the matrix buys operating
+system and architecture coverage today, not git-version coverage. The PPA row is
+there to *diverge* the moment a newer git ships, which is when it starts paying
+for itself — git 2.55 redefined `--since today` from the current instant to local
+midnight, and no distro shipped a git new enough to have caught that in advance.
+Covering an *older* git, which is where the `--since-as-filter` fallback and the
+pre-2.55 reading of `today` live, needs a pinned build rather than a runner
+image; there is an issue for it.
+
+**When a matrix row goes red, read which step failed first.** `tests/git_contract.rs`
+runs on its own, before everything else, and asserts what *git* does with no
+standup code in the way. A failure there means the environment changed under the
+plugin, and the place to start is `docs/git-plumbing.md`, which is where the
+claim it broke is written down. A failure in any later step, with the contract
+green, means the plugin is wrong. Working that out from a red build used to cost
+more than fixing either.
+
+Two rules for anything added to `git_contract.rs`: no standup code, and every
+assertion message names what depends on the behaviour, so the failure tells the
+next reader where to look rather than only that a number moved.
 
 No test requires a running herdr. The fixtures build throwaway git repositories
 in a temp directory, and the socket tests replay a captured real snapshot.
