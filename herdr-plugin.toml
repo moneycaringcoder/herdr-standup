@@ -72,6 +72,20 @@ contexts = ["global", "workspace"]
 command = ["./target/release/standup", "--markdown"]
 
 [[actions]]
+id = "slack"
+title = "Standup: Slack message to paste"
+description = "The same digest as Slack mrkdwn, which is not Markdown: single-asterisk bold, literal bullets, escaped entities."
+contexts = ["global", "workspace"]
+command = ["./target/release/standup", "--slack"]
+
+[[actions]]
+id = "html"
+title = "Standup: HTML to email"
+description = "The same digest as a self-contained HTML document, styles inline, nothing to fetch."
+contexts = ["global", "workspace"]
+command = ["./target/release/standup", "--html"]
+
+[[actions]]
 id = "json"
 title = "Standup: JSON snapshot"
 description = "Machine-readable digest for scripting. Does not move the --since-last marker."

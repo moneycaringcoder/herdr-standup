@@ -9,12 +9,6 @@ A feature that cannot meet that does not belong here.
 
 ## More ways to read it
 
-### Slack and HTML output
-
-Markdown for pasting and JSON for scripting already exist. Slack's mrkdwn is not
-Markdown, and the paste currently degrades. HTML would suit an emailed weekly
-rollup.
-
 ### Optional grouping by agent
 
 Grouping by repository is deliberate: grouping by time would put two commits from

@@ -278,6 +278,43 @@ checked before anything else, and a shape this binary does not know is refused b
 deserialised into something that happens to fit. `--diff` never advances the `--since-last` marker:
 what changed between two digests is not "a digest a human read".
 
+## Slack and HTML
+
+```sh
+standup --slack     # mrkdwn, for a standup channel
+standup --html      # a self-contained document, for an email
+```
+
+**Slack's mrkdwn is not Markdown**, and pasting the Markdown digest into Slack degrades in four
+specific ways. Each one is what `--slack` exists to avoid:
+
+| Markdown | in Slack |
+|---|---|
+| `**bold**` | renders literally, asterisks and all — mrkdwn's bold is a *single* asterisk |
+| `- item` | renders literally when posted through the API; mrkdwn has no list syntax at all |
+| `[text](url)` | renders literally; mrkdwn links are `<url\|text>` |
+| `&`, `<`, `>` | interpreted, so they have to arrive as `&amp;`, `&lt;`, `&gt;` |
+
+So `--slack` bolds with one asterisk, draws bullets with literal `•` and `◦` characters, and escapes
+exactly those three entities — and **only** those three. mrkdwn has no escape character, so putting
+a backslash in front of ordinary punctuation the way the Markdown renderer does would show the
+backslash in the channel. A branch called `feat/re[factor]` arrives with its brackets intact.
+
+`--html` is written for the least capable renderer it will meet, which for HTML means an email
+client:
+
+- **every style is inline** — Gmail and Outlook strip `<style>` blocks and `<link>` outright, so a
+  stylesheet is one that will not arrive;
+- **nothing to fetch** — no images, no fonts, no scripts, since remote content is blocked by default
+  and a blocked resource is worse than an absent one;
+- **layout by table**, which is the one thing Outlook renders predictably;
+- `&`, `<`, `>` and `"` always escaped — a branch called `feat/<x>` must not become a tag, and a path
+  interpolated into a `style` attribute must not end it.
+
+Both carry the same numbers as the other formats. That is asserted rather than assumed: the totals,
+the churn, the uncommitted counts and the unpushed count are extracted from all four renderings and
+compared, because **a format is a rendering and never a different answer**.
+
 ## How it works
 
 <img src="docs/img/pipeline.svg" alt="herdr's session snapshot and your checkouts feed a pipeline: candidate directories, identify, sibling worktrees, window resolution, per-checkout collection, grouping by repository, then the three renderers." width="100%">
@@ -360,6 +397,8 @@ standup --offline --path ~/repos/app --path ~/repos/api
 ```
 --report              Human-readable digest (default)
 --markdown            The same digest as Markdown
+--slack               The same digest as Slack mrkdwn
+--html                The same digest as an email-ready HTML document
 --json                The same digest as JSON
 
 --since <WHEN>        Anything git accepts (default: midnight, local)

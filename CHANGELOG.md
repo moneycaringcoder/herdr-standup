@@ -8,6 +8,31 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- `--slack` and `--html`, and a `--format` that accepts `slack` and `html`.
+  Both carry the same numbers as the other formats, which is asserted rather
+  than assumed: the totals, the churn, the uncommitted counts and the unpushed
+  count are extracted from all four renderings and compared, because a format is
+  a rendering and never a different answer.
+
+  **Slack's mrkdwn is not Markdown.** Pasting the Markdown digest degraded in
+  four specific ways, each verified against Slack's own documentation:
+  `**bold**` renders literally because mrkdwn's bold is a single asterisk;
+  `- item` renders literally because mrkdwn has no list syntax at all;
+  `[text](url)` renders literally because mrkdwn links are `<url|text>`; and
+  `&`, `<`, `>` are interpreted and have to arrive as entities. So `--slack`
+  bolds with one asterisk, draws bullets with literal `•` and `◦`, and escapes
+  exactly those three characters and **only** those three — mrkdwn has no escape
+  character, so a backslash in front of ordinary punctuation is a backslash a
+  reader sees, and `feat/re[factor]` arrives with its brackets intact.
+
+  `--html` is written for an email client rather than a browser: every style
+  inline, because Gmail and Outlook strip `<style>` and `<link>`; nothing to
+  fetch, because remote content is blocked by default and a blocked resource is
+  worse than an absent one; layout by table, which is what Outlook renders
+  predictably; and `&`, `<`, `>` and `"` always escaped, the fourth because paths
+  and branch names are interpolated into `style` attributes and a quote inside
+  one ends the attribute. Both new formats also render `--diff` comparisons.
+  The plugin manifest gains an action for each.
 - `--diff <FILE>`: compares a digest saved by an earlier `--json` run with the
   one this run collects, and reads as a **comparison rather than a longer
   digest**. No churn, no line volume, no commit list — those are what a digest
