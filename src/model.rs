@@ -144,10 +144,24 @@ pub struct AgentRef {
     pub pane_id: String,
     /// Per-pane status, e.g. `working`.
     pub status: Option<String>,
+    /// The directory this agent was working in, when herdr says.
+    ///
+    /// This is what makes attribution a fact rather than a guess. Agents are
+    /// reported per workspace, and a workspace's panes need not all sit in the
+    /// same checkout, so a workspace-scoped agent list credits every agent to
+    /// every checkout the workspace touches. The agent rows in a live capture
+    /// each carry their own `cwd`; where one does not, the answer is unknown and
+    /// says so rather than being spread across the candidates.
+    pub cwd: Option<PathBuf>,
 }
 
 impl AgentRef {
     /// Best display name: the user's label, else the program, else nothing.
+    ///
+    /// Not an identity. `agent` is `claude` for all but one row of the live
+    /// capture and `name` is absent on three, so two agents can share a display
+    /// name and still be two agents — see [`CheckoutDigest::agents`], which
+    /// deduplicates on the pane instead.
     pub fn display(&self) -> Option<&str> {
         self.name
             .as_deref()
@@ -425,25 +439,27 @@ pub struct CheckoutDigest {
     pub report: CheckoutReport,
     /// Workspaces whose panes were in this checkout. Usually one; zero when the
     /// checkout was found through a sibling worktree rather than a workspace.
+    ///
+    /// This is the workspace *roster*, not the attribution: a workspace listed
+    /// here has at least one pane in this checkout, and its `agents` are every
+    /// agent it holds wherever they were sitting. Who worked *here* is
+    /// [`CheckoutDigest::agents`], the field below.
     pub workspaces: Vec<WorkspaceRef>,
-}
-
-impl CheckoutDigest {
-    /// Every agent across every workspace here, deduplicated by display name,
-    /// in first-seen order.
-    pub fn agents(&self) -> Vec<&AgentRef> {
-        let mut out: Vec<&AgentRef> = Vec::new();
-        for workspace in &self.workspaces {
-            for agent in &workspace.agents {
-                let name = agent.display();
-                if name.is_some() && out.iter().any(|a| a.display() == name) {
-                    continue;
-                }
-                out.push(agent);
-            }
-        }
-        out
-    }
+    /// The agents herdr placed in this checkout, in pane order, one entry per
+    /// pane.
+    ///
+    /// Decided in `standup.rs` rather than derived here, because deciding it
+    /// needs git: an agent's `cwd` is a directory, and only git knows which
+    /// checkout a directory belongs to. An agent herdr could not place is in
+    /// neither this list nor another checkout's, and the digest says so in a
+    /// note — crediting it to every candidate would be a guess, and a reader
+    /// takes "this agent worked here" as a fact.
+    ///
+    /// One entry per pane, never per name. Two agents can share a display name
+    /// and still be two agents: `agent` is `claude` for all but one row of the
+    /// live capture, and `name` is absent on three of eighteen. Collapsing on
+    /// the name reported two agents in one checkout as one, which is #19.
+    pub agents: Vec<AgentRef>,
 }
 
 /// The rollup the roadmap asks for.

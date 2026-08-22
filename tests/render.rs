@@ -30,6 +30,8 @@ use standup::render::{json, markdown, text};
 /// The minus sign the renderers use, which is not a hyphen.
 const MINUS: &str = "\u{2212}";
 const ELLIPSIS: &str = "\u{2026}";
+/// The multiplication sign that counts repeated agent labels, not the letter x.
+const TIMES: &str = "\u{d7}";
 const ZONE: &str = "CEST +0200";
 const WIDTH: usize = 80;
 
@@ -158,16 +160,31 @@ fn alone(report: CheckoutReport) -> CheckoutDigest {
     CheckoutDigest {
         report,
         workspaces: Vec::new(),
+        agents: Vec::new(),
     }
 }
 
-fn agent(name: Option<&str>, program: Option<&str>) -> AgentRef {
+/// One agent in one pane. The pane is explicit because it is the identity: two
+/// agents can share a display label and still be two agents, which is #19.
+fn agent(pane: &str, name: Option<&str>, program: Option<&str>) -> AgentRef {
     AgentRef {
         name: name.map(str::to_string),
         program: program.map(str::to_string),
         session_id: Some("session-7f3a".to_string()),
-        pane_id: "pane-2".to_string(),
+        pane_id: pane.to_string(),
         status: Some("working".to_string()),
+        cwd: Some(PathBuf::from("/repos/app")),
+    }
+}
+
+/// A checkout whose agents herdr placed here, which is what the renderer
+/// credits. The workspace roster is carried alongside and is not the
+/// attribution.
+fn worked_by(report: CheckoutReport, agents: Vec<AgentRef>) -> CheckoutDigest {
+    CheckoutDigest {
+        report,
+        workspaces: vec![workspace("media", agents.clone())],
+        agents,
     }
 }
 
@@ -734,16 +751,13 @@ fn agents_are_named_and_their_session_ids_are_not() {
             &["a.rs"],
         )],
     );
-    let checkout_digest = CheckoutDigest {
+    let checkout_digest = worked_by(
         report,
-        workspaces: vec![workspace(
-            "media",
-            vec![
-                agent(Some("kestrel"), Some("opencode")),
-                agent(None, Some("claude")),
-            ],
-        )],
-    };
+        vec![
+            agent("w1:p1", Some("kestrel"), Some("opencode")),
+            agent("w1:p2", None, Some("claude")),
+        ],
+    );
     let digest = digest(vec![repo("app", vec![checkout_digest])], Vec::new());
 
     let flat = flatten(&plain(&digest));
@@ -753,6 +767,68 @@ fn agents_are_named_and_their_session_ids_are_not() {
     // team channel.
     assert!(!flat.contains("session-7f3a"), "{flat}");
     assert!(!md(&digest).contains("session-7f3a"));
+}
+
+/// #19, as a reader sees it. Two agents herdr never named, in one checkout, in
+/// one window. They share a display label, so deduplicating attribution by name
+/// reported them as one and silently halved the day's participants.
+///
+/// Both are credited, and the count is on the label rather than the label being
+/// repeated: `claude, claude` reads like a rendering bug, where `claude ×2`
+/// reads like the fact it is.
+#[test]
+fn two_agents_sharing_a_label_are_both_credited() {
+    let report = with_commits(
+        checkout("/repos/app/w", "feature/one"),
+        vec![commit(
+            "eeee0001eeee0001eeee0001eeee0001eeee0001",
+            "2026-08-15 08:00",
+            1_786_028_400,
+            "Work",
+            &["a.rs"],
+        )],
+    );
+    let checkout_digest = worked_by(
+        report,
+        vec![
+            agent("w1:p1", None, Some("claude")),
+            agent("w1:p2", None, Some("claude")),
+        ],
+    );
+    let digest = digest(vec![repo("app", vec![checkout_digest])], Vec::new());
+
+    for rendered in [plain(&digest), md(&digest)] {
+        let flat = flatten(&rendered);
+        assert!(
+            flat.contains(&format!("agents: claude {TIMES}2")),
+            "two agents must not read as one:\n{rendered}"
+        );
+    }
+}
+
+/// The other half of the same rule: a count only appears where there is
+/// something to count.
+#[test]
+fn a_single_agent_is_not_given_a_count() {
+    let report = with_commits(
+        checkout("/repos/app/w", "feature/one"),
+        vec![commit(
+            "ffff0001ffff0001ffff0001ffff0001ffff0001",
+            "2026-08-15 08:00",
+            1_786_028_400,
+            "Work",
+            &["a.rs"],
+        )],
+    );
+    let checkout_digest = worked_by(
+        report,
+        vec![agent("w1:p1", Some("kestrel"), Some("claude"))],
+    );
+    let digest = digest(vec![repo("app", vec![checkout_digest])], Vec::new());
+
+    let flat = flatten(&plain(&digest));
+    assert!(flat.contains("agents: kestrel (claude)"), "{flat}");
+    assert!(!flat.contains(TIMES), "{flat}");
 }
 
 #[test]

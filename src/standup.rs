@@ -20,16 +20,17 @@
 //! 6. **Report** each checkout, and roll up by repository.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::clock;
 use crate::config::Config;
 use crate::git::{CheckoutId, Git};
 use crate::herdr::Herdr;
 use crate::model::{
-    Activity, CheckoutDigest, Churn, Digest, Note, RepoDigest, RepoKey, WorkspaceRef,
+    Activity, AgentRef, CheckoutDigest, Churn, Digest, Note, RepoDigest, RepoKey, WorkspaceRef,
     SCHEMA_VERSION,
 };
+use crate::render::quantity;
 use crate::window;
 use crate::Result;
 
@@ -60,6 +61,10 @@ pub fn build(config: &Config) -> Result<Digest> {
     // sessions have at least one — but it is still worth one line, because
     // "standup did not mention that workspace" should never be a mystery.
     let mut checkouts: Vec<(CheckoutId, Vec<WorkspaceRef>)> = Vec::new();
+    // Which checkout each candidate directory turned out to be part of. Only
+    // git can answer that — an agent's `cwd` may be a subdirectory of the
+    // checkout root — so the answers are kept rather than recomputed.
+    let mut resolved: Vec<(PathBuf, PathBuf)> = Vec::new();
     for candidate in &candidates {
         match git.identify(candidate) {
             Ok(Some(id)) => {
@@ -73,6 +78,7 @@ pub fn build(config: &Config) -> Result<Digest> {
                         here.push(workspace.clone());
                     }
                 }
+                resolved.push((candidate.clone(), id.path.clone()));
                 merge_checkout(&mut checkouts, id, here);
             }
             Ok(None) => {
@@ -98,11 +104,19 @@ pub fn build(config: &Config) -> Result<Digest> {
         window::resolve(&git, &anchors, &crate::config::date_ref_repo(), config)?;
     notes.extend(window_notes);
 
+    let (placed, placement_notes) = place_agents(&workspaces, &resolved);
+    notes.extend(placement_notes);
+
     // Report, then group. Grouping by repository is the deliberate choice: see
     // `model::RepoDigest`.
     let mut by_repo: BTreeMap<RepoKey, RepoDigest> = BTreeMap::new();
     for (id, workspaces) in checkouts {
         let report = git.report(&id, &reporting_window);
+        let agents = placed
+            .iter()
+            .find(|(path, _)| *path == id.path)
+            .map(|(_, agents)| agents.clone())
+            .unwrap_or_default();
         let entry = by_repo
             .entry(id.repo_key.clone())
             .or_insert_with(|| RepoDigest {
@@ -113,7 +127,11 @@ pub fn build(config: &Config) -> Result<Digest> {
                 commits: 0,
                 churn: Churn::default(),
             });
-        entry.checkouts.push(CheckoutDigest { report, workspaces });
+        entry.checkouts.push(CheckoutDigest {
+            report,
+            workspaces,
+            agents,
+        });
     }
 
     let mut repos: Vec<RepoDigest> = by_repo.into_values().collect();
@@ -170,6 +188,94 @@ fn collect_workspaces(config: &Config, notes: &mut Vec<Note>) -> Result<Vec<Work
         }
         Err(err) => Err(err),
     }
+}
+
+/// Decides which checkout each agent worked in.
+///
+/// The problem this solves: herdr reports agents **per workspace**, and a
+/// workspace is not a place. Its panes can sit in different checkouts, so
+/// handing a checkout the whole workspace roster credits every agent with work
+/// in every directory the workspace touched. A reader takes "shear-classifier
+/// worked here" as a fact, and two agents in one window collapsing into
+/// whichever herdr mentioned last is the same failure from the other side.
+///
+/// So each agent is placed by its **own** directory, resolved through `resolved`
+/// — the candidate directories git already turned into checkouts, which is the
+/// only authority on which checkout a directory belongs to.
+///
+/// Three cases, and the third is the point:
+///
+/// 1. The agent's directory resolves to a checkout. It is placed there. Exact.
+/// 2. The agent has no directory, and its workspace touches exactly one
+///    checkout. There is nowhere else it could have been, so it is placed
+///    there. Still exact.
+/// 3. The agent has no directory and its workspace spans several checkouts.
+///    **Unknowable**, so it is placed nowhere and the caller gets a note naming
+///    the workspace and the count. Spreading it across the candidates would put
+///    a guess where the digest promises a fact.
+///
+/// Returns `(checkout root, agents)` pairs and the notes for case three.
+fn place_agents(
+    workspaces: &[WorkspaceRef],
+    resolved: &[(PathBuf, PathBuf)],
+) -> (Vec<(PathBuf, Vec<AgentRef>)>, Vec<Note>) {
+    let checkout_of = |dir: &Path| -> Option<&PathBuf> {
+        resolved
+            .iter()
+            .find(|(candidate, _)| candidate == dir)
+            .map(|(_, root)| root)
+    };
+
+    let mut placed: Vec<(PathBuf, Vec<AgentRef>)> = Vec::new();
+    let mut notes: Vec<Note> = Vec::new();
+    let place = |placed: &mut Vec<(PathBuf, Vec<AgentRef>)>, root: &PathBuf, agent: &AgentRef| {
+        match placed.iter_mut().find(|(seen, _)| seen == root) {
+            // One entry per pane. Two agents sharing a display name are two
+            // agents; the same pane reached twice is one.
+            Some((_, agents)) => {
+                if !agents.iter().any(|a| a.pane_id == agent.pane_id) {
+                    agents.push(agent.clone());
+                }
+            }
+            None => placed.push((root.clone(), vec![agent.clone()])),
+        }
+    };
+
+    for workspace in workspaces {
+        // The checkouts this workspace actually touches, in path order.
+        let mut spans: Vec<&PathBuf> = Vec::new();
+        for path in &workspace.paths {
+            if let Some(root) = checkout_of(path) {
+                if !spans.contains(&root) {
+                    spans.push(root);
+                }
+            }
+        }
+
+        let mut unplaceable = 0usize;
+        for agent in &workspace.agents {
+            match agent.cwd.as_deref().and_then(checkout_of) {
+                Some(root) => place(&mut placed, root, agent),
+                None => match spans.as_slice() {
+                    [only] => place(&mut placed, only, agent),
+                    [] => {}
+                    _ => unplaceable += 1,
+                },
+            }
+        }
+
+        if unplaceable > 0 {
+            notes.push(Note::warning(format!(
+                "workspace {:?} spans {} checkouts and herdr did not say which of them {} \
+                 worked in, so that work is credited to none of them",
+                workspace.label,
+                spans.len(),
+                quantity(unplaceable, "agent", "agents"),
+            )));
+        }
+    }
+
+    (placed, notes)
 }
 
 /// Adds every other checkout of every repository already present.
@@ -301,5 +407,192 @@ fn label_for(owners: &[(PathBuf, WorkspaceRef)], path: &PathBuf) -> String {
 fn push_unique(list: &mut Vec<PathBuf>, path: PathBuf) {
     if !list.contains(&path) {
         list.push(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Severity;
+
+    fn agent(pane: &str, name: Option<&str>, program: &str, cwd: Option<&str>) -> AgentRef {
+        AgentRef {
+            name: name.map(str::to_string),
+            program: Some(program.to_string()),
+            session_id: None,
+            pane_id: pane.to_string(),
+            status: None,
+            cwd: cwd.map(PathBuf::from),
+        }
+    }
+
+    fn workspace(label: &str, paths: &[&str], agents: Vec<AgentRef>) -> WorkspaceRef {
+        WorkspaceRef {
+            workspace_id: format!("ws-{label}"),
+            label: label.to_string(),
+            number: None,
+            paths: paths.iter().map(PathBuf::from).collect(),
+            agents,
+            agent_status: None,
+        }
+    }
+
+    fn resolved(pairs: &[(&str, &str)]) -> Vec<(PathBuf, PathBuf)> {
+        pairs
+            .iter()
+            .map(|(dir, root)| (PathBuf::from(dir), PathBuf::from(root)))
+            .collect()
+    }
+
+    fn credited<'a>(placed: &'a [(PathBuf, Vec<AgentRef>)], root: &str) -> Vec<&'a str> {
+        placed
+            .iter()
+            .find(|(path, _)| path == &PathBuf::from(root))
+            .map(|(_, agents)| agents.iter().map(|a| a.pane_id.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The headline of #19: two agents in one window, in one checkout, are two
+    /// agents. They share a program and neither is named, which is the shape the
+    /// live capture makes likely — `claude` on all but one of eighteen rows, and
+    /// three of them unnamed — and it is exactly the shape that collapsed when
+    /// agents were deduplicated by display name.
+    #[test]
+    fn two_unnamed_agents_sharing_a_checkout_stay_two_agents() {
+        let workspaces = vec![workspace(
+            "atlas",
+            &["/code/atlas"],
+            vec![
+                agent("w1:p1", None, "claude", Some("/code/atlas")),
+                agent("w1:p2", None, "claude", Some("/code/atlas")),
+            ],
+        )];
+        let (placed, notes) =
+            place_agents(&workspaces, &resolved(&[("/code/atlas", "/code/atlas")]));
+
+        assert_eq!(credited(&placed, "/code/atlas"), ["w1:p1", "w1:p2"]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// A workspace is not a place. Its panes can sit in different checkouts, and
+    /// crediting every agent to every one of them is a guess presented as a fact.
+    #[test]
+    fn a_workspace_spanning_two_checkouts_credits_each_agent_where_it_worked() {
+        let workspaces = vec![workspace(
+            "atlas",
+            &["/code/atlas", "/code/atlas-wt"],
+            vec![
+                agent("w1:p1", Some("kestrel"), "claude", Some("/code/atlas")),
+                agent("w1:p2", Some("wren"), "claude", Some("/code/atlas-wt")),
+            ],
+        )];
+        let (placed, notes) = place_agents(
+            &workspaces,
+            &resolved(&[
+                ("/code/atlas", "/code/atlas"),
+                ("/code/atlas-wt", "/code/atlas-wt"),
+            ]),
+        );
+
+        assert_eq!(credited(&placed, "/code/atlas"), ["w1:p1"]);
+        assert_eq!(credited(&placed, "/code/atlas-wt"), ["w1:p2"]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// An agent's directory need not be the checkout root, so the answer comes
+    /// from git's own resolution of the candidate rather than a path comparison.
+    #[test]
+    fn an_agent_in_a_subdirectory_is_credited_to_the_checkout() {
+        let workspaces = vec![workspace(
+            "atlas",
+            &["/code/atlas/crates/core"],
+            vec![agent(
+                "w1:p1",
+                Some("kestrel"),
+                "claude",
+                Some("/code/atlas/crates/core"),
+            )],
+        )];
+        let (placed, notes) = place_agents(
+            &workspaces,
+            &resolved(&[("/code/atlas/crates/core", "/code/atlas")]),
+        );
+
+        assert_eq!(credited(&placed, "/code/atlas"), ["w1:p1"]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// `cwd` is optional in herdr's protocol. With one checkout in the workspace
+    /// there is nowhere else the agent could have been, so this is still a fact
+    /// rather than a guess and gets no note.
+    #[test]
+    fn an_agent_with_no_directory_is_placed_when_there_is_only_one_candidate() {
+        let workspaces = vec![workspace(
+            "atlas",
+            &["/code/atlas"],
+            vec![agent("w1:p1", Some("kestrel"), "claude", None)],
+        )];
+        let (placed, notes) =
+            place_agents(&workspaces, &resolved(&[("/code/atlas", "/code/atlas")]));
+
+        assert_eq!(credited(&placed, "/code/atlas"), ["w1:p1"]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// The case the issue insists on: unknowable, so it reads as unknown. The
+    /// agent is credited to neither checkout and the digest says why, rather than
+    /// being spread across both or silently attached to the last one seen.
+    #[test]
+    fn an_unplaceable_agent_is_credited_to_nobody_and_said_out_loud() {
+        let workspaces = vec![workspace(
+            "atlas",
+            &["/code/atlas", "/code/atlas-wt"],
+            vec![
+                agent("w1:p1", Some("kestrel"), "claude", Some("/code/atlas")),
+                agent("w1:p2", Some("wren"), "claude", None),
+            ],
+        )];
+        let (placed, notes) = place_agents(
+            &workspaces,
+            &resolved(&[
+                ("/code/atlas", "/code/atlas"),
+                ("/code/atlas-wt", "/code/atlas-wt"),
+            ]),
+        );
+
+        assert_eq!(credited(&placed, "/code/atlas"), ["w1:p1"]);
+        assert!(
+            credited(&placed, "/code/atlas-wt").is_empty(),
+            "an unknown directory must not become a credit"
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(notes[0].severity, Severity::Warning);
+        assert!(notes[0].message.contains("atlas"), "{:?}", notes[0].message);
+        assert!(notes[0].message.contains('2'), "{:?}", notes[0].message);
+        assert!(
+            notes[0].message.contains("1 agent"),
+            "the count must be exact: {:?}",
+            notes[0].message
+        );
+    }
+
+    /// A directory that is not a checkout resolves to nothing, and an agent
+    /// sitting in one is not evidence about any repository.
+    #[test]
+    fn an_agent_outside_every_checkout_is_credited_nowhere() {
+        let workspaces = vec![workspace(
+            "notes",
+            &["/home/dev/notes"],
+            vec![agent(
+                "w1:p1",
+                Some("kestrel"),
+                "claude",
+                Some("/home/dev/notes"),
+            )],
+        )];
+        let (placed, notes) = place_agents(&workspaces, &resolved(&[]));
+
+        assert!(placed.is_empty(), "{placed:?}");
+        assert!(notes.is_empty(), "{notes:?}");
     }
 }

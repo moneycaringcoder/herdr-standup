@@ -337,6 +337,13 @@ fn paths_of(workspace: &Value, panes: &[&Value]) -> Vec<PathBuf> {
 
 /// The agents herdr reports in one workspace, ordered by pane so the digest is
 /// stable between runs.
+///
+/// Each one carries the directory it was sitting in, because a workspace is not
+/// a place: its panes can be in different checkouts, and an agent list scoped
+/// only to the workspace credits every agent to every one of them. The agent
+/// rows in the live capture each carry their own `cwd`; the protocol marks it
+/// optional, so the pane the row names is consulted second and the answer is
+/// allowed to stay `None`. Guessing is what this exists to stop.
 fn agents_of(workspace_id: &str, agent_rows: &[Value], panes: &[&Value]) -> Vec<AgentRef> {
     let mut agents: Vec<AgentRef> = Vec::new();
     let mut joined: HashSet<&str> = HashSet::new();
@@ -344,7 +351,8 @@ fn agents_of(workspace_id: &str, agent_rows: &[Value], panes: &[&Value]) -> Vec<
         if text(row, "workspace_id") != Some(workspace_id) {
             continue;
         }
-        if let Some(pane_id) = text(row, "pane_id") {
+        let pane_id = text(row, "pane_id");
+        if let Some(pane_id) = pane_id {
             joined.insert(pane_id);
         }
         agents.push(AgentRef {
@@ -354,8 +362,9 @@ fn agents_of(workspace_id: &str, agent_rows: &[Value], panes: &[&Value]) -> Vec<
             // The program: `claude`, `opencode`.
             program: text(row, "agent").map(str::to_string),
             session_id: session_id(row),
-            pane_id: text(row, "pane_id").unwrap_or_default().to_string(),
+            pane_id: pane_id.unwrap_or_default().to_string(),
             status: text(row, "agent_status").map(str::to_string),
+            cwd: agent_cwd(row, pane_id, panes),
         });
     }
 
@@ -379,11 +388,29 @@ fn agents_of(workspace_id: &str, agent_rows: &[Value], panes: &[&Value]) -> Vec<
             session_id: session_id(pane),
             pane_id: pane_id.to_string(),
             status: text(pane, "agent_status").map(str::to_string),
+            cwd: text(pane, "cwd").map(tidy_path),
         });
     }
 
     agents.sort_by(|a, b| natural_cmp(&a.pane_id, &b.pane_id));
     agents
+}
+
+/// Where an agent was working: its own `cwd`, else its pane's.
+///
+/// `cwd`, never `foreground_cwd`, for the same reason [`paths_of`] avoids it —
+/// the latter follows the foreground process and was observed pointing at a
+/// pyright install. `None` is a real answer and stays one.
+fn agent_cwd(row: &Value, pane_id: Option<&str>, panes: &[&Value]) -> Option<PathBuf> {
+    if let Some(cwd) = text(row, "cwd") {
+        return Some(tidy_path(cwd));
+    }
+    let pane_id = pane_id?;
+    panes
+        .iter()
+        .find(|pane| text(pane, "pane_id") == Some(pane_id))
+        .and_then(|pane| text(pane, "cwd"))
+        .map(tidy_path)
 }
 
 /// `agent_session` is an **object** on the wire — `{agent, kind, source,

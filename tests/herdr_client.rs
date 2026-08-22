@@ -20,7 +20,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -824,4 +824,116 @@ fn every_captured_agent_lands_in_exactly_one_workspace() {
     assert_eq!(rows, 18);
     assert_eq!(total, 18, "no agent duplicated across workspaces");
     assert_eq!(seen.len(), 18, "no agent dropped");
+}
+
+/// Attribution needs a directory, not a workspace. Every agent row in the live
+/// capture carries its own `cwd`, and that is what makes "this agent worked
+/// here" a fact instead of an inference from the workspace it belongs to.
+#[test]
+fn every_captured_agent_carries_the_directory_it_worked_in() {
+    let workspaces = reduce_snapshot(&captured_snapshot());
+    let atlas = workspace(&workspaces, "w15");
+
+    assert_eq!(atlas.agents.len(), 4);
+    for agent in &atlas.agents {
+        assert_eq!(
+            agent.cwd.as_deref(),
+            Some(Path::new("/home/dev/code/atlas")),
+            "{} lost its directory",
+            agent.pane_id
+        );
+    }
+}
+
+/// The protocol marks `agents[].cwd` optional, so the pane the row names is the
+/// second source — the same pane whose `cwd` already contributes to
+/// `workspace.paths`.
+#[test]
+fn an_agent_row_with_no_cwd_falls_back_to_its_pane() {
+    let mut snapshot = captured_snapshot();
+    for row in snapshot["agents"].as_array_mut().expect("agents") {
+        if row["pane_id"] == json!("w15:p2") {
+            row.as_object_mut().expect("row").remove("cwd");
+        }
+    }
+
+    let workspaces = reduce_snapshot(&snapshot);
+    let agent = &workspace(&workspaces, "w15").agents[1];
+
+    assert_eq!(agent.pane_id, "w15:p2");
+    assert_eq!(
+        agent.cwd.as_deref(),
+        Some(Path::new("/home/dev/code/atlas")),
+        "the pane it names knows where it was"
+    );
+}
+
+/// And when neither says, the answer is unknown. A directory invented here
+/// would become a credit in the digest, which is the whole failure #19 is about.
+#[test]
+fn an_agent_with_no_directory_anywhere_reports_none() {
+    let mut snapshot = captured_snapshot();
+    for row in snapshot["agents"].as_array_mut().expect("agents") {
+        if row["pane_id"] == json!("w15:p2") {
+            row.as_object_mut().expect("row").remove("cwd");
+        }
+    }
+    for pane in snapshot["panes"].as_array_mut().expect("panes") {
+        if pane["pane_id"] == json!("w15:p2") {
+            pane.as_object_mut().expect("pane").remove("cwd");
+        }
+    }
+
+    let workspaces = reduce_snapshot(&snapshot);
+    let agent = &workspace(&workspaces, "w15").agents[1];
+
+    assert_eq!(agent.pane_id, "w15:p2");
+    assert_eq!(agent.cwd, None, "absent, never guessed");
+}
+
+/// A workspace whose panes straddle two checkouts is the shape the whole bug
+/// lives in, and the live capture has none — all ten of its workspaces sit in a
+/// single directory. So it is built here, from the capture rather than from
+/// imagination: one of `w15`'s four panes, and the agent in it, moved to a
+/// sibling worktree.
+#[test]
+fn a_workspace_can_straddle_two_directories_and_each_agent_keeps_its_own() {
+    let mut snapshot = captured_snapshot();
+    let moved = json!("/home/dev/code/atlas-wt");
+    for row in snapshot["agents"].as_array_mut().expect("agents") {
+        if row["pane_id"] == json!("w15:p4") {
+            row["cwd"] = moved.clone();
+        }
+    }
+    for pane in snapshot["panes"].as_array_mut().expect("panes") {
+        if pane["pane_id"] == json!("w15:p4") {
+            pane["cwd"] = moved.clone();
+        }
+    }
+
+    let workspaces = reduce_snapshot(&snapshot);
+    let atlas = workspace(&workspaces, "w15");
+
+    assert_eq!(
+        atlas.paths,
+        vec![
+            PathBuf::from("/home/dev/code/atlas"),
+            PathBuf::from("/home/dev/code/atlas-wt"),
+        ],
+        "both directories are candidates"
+    );
+    assert_eq!(
+        atlas
+            .agents
+            .iter()
+            .map(|a| a.cwd.as_deref().and_then(Path::to_str).unwrap_or("?"))
+            .collect::<Vec<_>>(),
+        [
+            "/home/dev/code/atlas",
+            "/home/dev/code/atlas",
+            "/home/dev/code/atlas",
+            "/home/dev/code/atlas-wt",
+        ],
+        "the roster is the workspace's; the directory is each agent's own"
+    );
 }

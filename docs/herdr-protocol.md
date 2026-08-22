@@ -83,6 +83,29 @@ is doing, and in the live capture it pointed at
 for a pane whose actual working directory was a repository. `cwd` is the
 pane's own directory and is the one to use.
 
+### A workspace is not a place
+
+`agents[]` rows are keyed to a workspace, and a workspace's panes need not all
+sit in the same checkout: `paths_of` returns the union of the tracked checkout
+path and every distinct pane `cwd`, and that is regularly more than one
+directory. So a workspace-scoped agent list credits every agent with work in
+every checkout the workspace touched, which is a guess where the digest promises
+a fact — and two agents in one window then collapse into whichever herdr
+mentioned last.
+
+Each `agents[]` row carries its own `cwd`, and in the live capture all eighteen
+do. That is the field attribution is built on, with the row's own `pane_id`
+resolving to a pane as the second source. `cwd` is **optional** here, so the
+answer is allowed to be unknown: `standup.rs::place_agents` places an agent with
+no directory only when its workspace touches exactly one checkout — where there
+is nowhere else it could have been — and otherwise credits it to nothing and
+says so in a note.
+
+Note that the capture has **no** workspace whose panes straddle two directories:
+all ten sit in one. The tests build that case by moving one pane and its agent
+onto a sibling worktree, which is the only honest way to cover a shape the
+capture does not contain.
+
 ### Fields, as observed
 
 ```
