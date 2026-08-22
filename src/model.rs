@@ -40,13 +40,23 @@ impl RepoKey {
 // Time
 // ---------------------------------------------------------------------------
 
-/// An instant, carried as both the machine value and the exact local rendering.
+/// An instant, carried as the machine value, the exact local rendering, and the
+/// offset that connects them.
 ///
-/// The roadmap calls an ambiguous timestamp in a daily digest a bug, so the two
+/// The roadmap calls an ambiguous timestamp in a daily digest a bug, so the
 /// halves travel together: `epoch` is what git was given, `local` is what the
-/// user is shown, and `zone` names the zone `local` is expressed in. A renderer
-/// can never accidentally print a UTC instant as if it were local, because it
-/// has no way to format `epoch` itself.
+/// user is shown, `zone` names the zone `local` is expressed in for a reader, and
+/// `offset_seconds` is that same fact for a script. A renderer can never
+/// accidentally print a UTC instant as if it were local, because it has no way to
+/// format `epoch` itself.
+///
+/// `zone` is prose — `CEST +0200`, or a bare `+0200` where the platform has no
+/// abbreviation, or `unknown zone` where it has no zone at all — which is right
+/// for a header and no use to a consumer that has to parse it. `offset_seconds`
+/// is the machine-readable half, and it is **per stamp** rather than once per
+/// digest on purpose: a window can span a daylight-saving transition, so two
+/// commits in one digest can legitimately have different offsets, and a single
+/// zone field at the top would be wrong for one of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {
     /// Seconds since the Unix epoch.
@@ -55,6 +65,12 @@ pub struct Stamp {
     pub local: String,
     /// Zone abbreviation and offset, e.g. `CEST +0200`.
     pub zone: String,
+    /// Seconds east of UTC for the offset `local` was rendered in: `+0200` is
+    /// `7200`. `None` when the platform could not resolve a local zone at all,
+    /// which is the same case that makes `local` read `epoch <n>` — an absent
+    /// offset and an offset of zero are not the same answer, and a consumer that
+    /// confused them would place the whole digest in UTC.
+    pub offset_seconds: Option<i64>,
 }
 
 impl Stamp {

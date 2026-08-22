@@ -118,9 +118,11 @@ deliberately leave it out, because they are written to be pasted somewhere share
 ```json
 {
   "schema": 1,
-  "generated_at": { "epoch": 1786835716, "local": "2026-08-15 23:15", "zone": "UTC +0000" },
+  "generated_at": { "epoch": 1786835716, "local": "2026-08-15 23:15", "zone": "UTC +0000",
+                    "offset_seconds": 0 },
   "window": {
-    "since": { "epoch": 1786752000, "local": "2026-08-15 00:00", "zone": "UTC +0000" },
+    "since": { "epoch": 1786752000, "local": "2026-08-15 00:00", "zone": "UTC +0000",
+               "offset_seconds": 0 },
     "until": null,
     "source": { "kind": "explicit", "spec": "2026-08-15T00:00:00" }
   },
@@ -142,8 +144,20 @@ deliberately leave it out, because they are written to be pasted somewhere share
 }
 ```
 
-Every timestamp is an `{epoch, local, zone}` triple, so a script gets the machine value and a human
-gets an instant that cannot be misread as UTC.
+Every timestamp is an `{epoch, local, zone, offset_seconds}` object, so a script gets the machine
+value and a human gets an instant that cannot be misread as UTC.
+
+`zone` is prose — `CEST +0200`, or a bare `+0200` where the platform has no abbreviation, or
+`unknown zone` where it has none at all — which is right for a header and no use to a consumer that
+has to parse it. `offset_seconds` is the same fact as a number: seconds east of UTC, `19800` for
+`+05:30`, and `null` only when no local zone could be resolved, which is the case that also makes
+`local` read `epoch <n>`. An absent offset and an offset of zero are not the same answer.
+
+It is **per timestamp**, not once per digest, because a window can span a daylight-saving change: a
+`--monthly` digest of March legitimately holds stamps at `+0100` and `+0200`, and one zone field at
+the top would be wrong for half of them. `epoch + offset_seconds` reproduces `local` exactly, which
+`tests/json_time.rs` asserts under six zones — including the half-hour and three-quarter-hour ones —
+with the calendar arithmetic written a second time so the same bug cannot produce both sides.
 
 ## Windows
 

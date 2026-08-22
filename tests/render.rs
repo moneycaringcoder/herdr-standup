@@ -90,6 +90,7 @@ fn stamp(local: &str, epoch: i64) -> Stamp {
         epoch,
         local: local.to_string(),
         zone: ZONE.to_string(),
+        offset_seconds: Some(7_200),
     }
 }
 
