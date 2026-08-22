@@ -21,6 +21,10 @@ So any change touching `src/git.rs` must keep these true:
 - every git invocation passes `--no-optional-locks`
 - nothing is ever staged, and `GIT_INDEX_FILE` is never pointed at a real index
 - no command creates an object, mutates a ref, or touches the working tree
+- every git invocation sets `GIT_NO_LAZY_FETCH=1`, because in a partial clone git
+  answers a missing blob by fetching it from the promisor remote and writing it
+  into the repository — a write and a network call from a plugin that promises
+  neither
 
 And one thing that is not obvious: **`--no-optional-locks` does not cover `git
 diff`.** Diff's index refresh is not optional, so it rewrites the index — and

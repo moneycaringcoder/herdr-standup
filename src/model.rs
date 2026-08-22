@@ -297,17 +297,53 @@ pub enum Tracking {
 /// [`Tracking`]. When the default branch cannot be determined the answer is
 /// [`Landed::Unknown`] with the reason attached — never a bare `false`, which
 /// would read as "did not land".
+///
+/// Two states here both mean "the work is in", and they are kept apart on
+/// purpose. [`Landed::Merged`] is *containment*, which
+/// `git merge-base --is-ancestor` proves outright: the commit itself is on the
+/// trunk. [`Landed::Equivalent`] is a *matching patch*, which is all that
+/// survives a squash merge or a rebase merge — both rewrite the commit, so the
+/// original sha never reaches the trunk and containment answers "no" for work
+/// that shipped weeks ago. A matching patch is strong evidence and not proof,
+/// since two commits with the same diff are indistinguishable by patch id, so
+/// the digest says which of the two it holds rather than flattening them into
+/// one word.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Landed {
     /// This checkout *is* the default branch.
     IsDefault { name: String },
-    /// HEAD is an ancestor of the default branch: the work is in.
+    /// HEAD is an ancestor of the default branch: the work is in, exactly.
     Merged { into: String },
-    /// HEAD is not an ancestor of the default branch.
+    /// HEAD is not an ancestor of the default branch, but the same patch is on
+    /// it under another sha — what a squash or a rebase merge leaves behind.
+    Equivalent { into: String, how: Equivalence },
+    /// HEAD is not an ancestor of the default branch and no equivalent patch
+    /// was found on it either.
     NotMerged { into: String },
     /// No default branch could be identified, or HEAD has no commit.
     Unknown { reason: String },
+}
+
+/// Which probe found the equivalent patch, and what it found.
+///
+/// Both carry enough to re-run by hand, because the standard for every number
+/// in this digest is that one git command reproduces it, and a verdict this
+/// indirect owes the reader that command more than the exact ones do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Equivalence {
+    /// Every commit on the branch has a patch-id twin on the default branch:
+    /// `git cherry <default> HEAD` printed `-` lines and nothing else. This is
+    /// the shape a rebase merge leaves, and the shape a squash of a single
+    /// commit leaves.
+    EveryCommit { commits: u64 },
+    /// One commit on the default branch carries the patch id of this branch's
+    /// whole diff against the merge base. This is the shape a squash merge of
+    /// more than one commit leaves: no individual patch survives it, so
+    /// `git cherry` finds nothing and the combined diff is the only thing left
+    /// to match.
+    Squashed { oid: String },
 }
 
 /// How much a checkout has to say. Ordering matters: renderers sort busiest

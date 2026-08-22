@@ -538,6 +538,73 @@ impl Fixture {
         path
     }
 
+    /// A worktree whose branch was **squash**-merged into `main`, which is the
+    /// default on a great many forges.
+    ///
+    /// Three commits collapse into one, so not one of the branch's patch ids
+    /// survives on the trunk and `git cherry` marks every commit `+`. The only
+    /// thing left to match is the branch's *combined* diff against the fork
+    /// point. The trunk also gains a commit of its own first, so that combined
+    /// diff is not simply the whole trunk range — which would make the test
+    /// pass for the wrong reason.
+    ///
+    /// The files are **forty lines long and edited in the middle**, which is
+    /// load-bearing rather than decoration: a one-line file is shorter than any
+    /// plausible `diff.context`, so every context setting produces byte-identical
+    /// output and a test built on one cannot tell a pinned diff option from an
+    /// inherited one.
+    ///
+    /// `main` is left pointing at the squash commit, so a test can name the sha
+    /// the plugin is expected to find with `rev-parse main`.
+    pub fn squash_merged_worktree(&self, name: &str, branch: &str) -> PathBuf {
+        let path = self.worktree(name, branch);
+        self.write(&path, &format!("{branch}-a.txt"), &lines(40, None));
+        self.commit_all_at(&path, T_IN1, "a long file");
+        self.write(&path, &format!("{branch}-a.txt"), &lines(40, Some(20)));
+        self.commit_all_at(&path, T_IN1 + 60, "edit deep inside it");
+        self.write(&path, &format!("{branch}-b.txt"), &lines(40, None));
+        self.commit_all_at(&path, T_IN1 + 120, "a second long file");
+
+        self.write(
+            &self.repo,
+            &format!("trunk-before-{branch}.txt"),
+            &lines(40, Some(20)),
+        );
+        self.commit_all_at(&self.repo, T_IN1 + 180, "unrelated trunk work");
+        // `--squash` stages the combined change without recording a merge, so
+        // the commit that follows has one parent and no link to the branch.
+        self.git(&self.repo, &["merge", "-q", "--squash", branch]);
+        self.commit_at(&self.repo, T_IN2, &format!("squash {branch} (#12)"));
+        path
+    }
+
+    /// A worktree whose branch was **rebase**-merged into `main`: every commit
+    /// replayed onto the trunk, so each keeps its patch and none keeps its sha.
+    ///
+    /// The mirror image of the squash case. Here the individual patch ids are
+    /// exactly what survives, and the combined diff of the trunk range does
+    /// *not* match the branch, because the trunk moved on first.
+    pub fn rebase_merged_worktree(&self, name: &str, branch: &str) -> PathBuf {
+        let path = self.worktree(name, branch);
+        self.write(&path, &format!("{branch}-a.txt"), "first\n");
+        self.commit_all_at(&path, T_IN1, "first step");
+        self.write(&path, &format!("{branch}-b.txt"), "second\n");
+        self.commit_all_at(&path, T_IN1 + 60, "second step");
+
+        self.write(&self.repo, &format!("trunk-before-{branch}.txt"), "trunk\n");
+        self.commit_all_at(&self.repo, T_IN1 + 180, "unrelated trunk work");
+        // Replaying onto the trunk without moving the branch is what a forge's
+        // "rebase and merge" leaves behind locally: the checkout still holds
+        // the original shas.
+        self.git_at(
+            &self.repo,
+            T_IN2,
+            T_IN2,
+            &["cherry-pick", &format!("main..{branch}")],
+        );
+        path
+    }
+
     // -----------------------------------------------------------------------
     // Working-tree shapes
     // -----------------------------------------------------------------------
@@ -641,6 +708,20 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// `count` numbered lines, with one of them marked.
+///
+/// Long enough that a diff of it has real context above and below the change,
+/// which is what makes a fixture able to tell `-U3` from an inherited
+/// `diff.context`. A one-line file cannot.
+pub fn lines(count: usize, edited: Option<usize>) -> String {
+    (1..=count)
+        .map(|n| match edited {
+            Some(marked) if marked == n => format!("line {n} EDITED\n"),
+            _ => format!("line {n}\n"),
+        })
+        .collect()
 }
 
 #[cfg(unix)]

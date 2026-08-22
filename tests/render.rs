@@ -21,8 +21,9 @@ use std::path::PathBuf;
 
 use standup::config::Config;
 use standup::model::{
-    AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Head, Landed, Note,
-    RepoDigest, RepoKey, Stamp, Tracking, Window, WindowSource, WorkspaceRef, SCHEMA_VERSION,
+    AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Equivalence, Head,
+    Landed, Note, RepoDigest, RepoKey, Stamp, Tracking, Window, WindowSource, WorkspaceRef,
+    SCHEMA_VERSION,
 };
 use standup::render::{json, markdown, text};
 
@@ -630,6 +631,22 @@ fn every_landed_variant_gets_its_own_sentence_and_never_a_bare_false() {
             "merged into origin/main",
         ),
         (
+            Landed::Equivalent {
+                into: "origin/main".to_string(),
+                how: Equivalence::EveryCommit { commits: 3 },
+            },
+            "every commit is on origin/main by patch, not by sha",
+        ),
+        (
+            Landed::Equivalent {
+                into: "origin/main".to_string(),
+                how: Equivalence::Squashed {
+                    oid: "6df5ff43f499b52033c34557418e036589a1854c".to_string(),
+                },
+            },
+            "on origin/main by patch as 6df5ff43, not by sha",
+        ),
+        (
             Landed::NotMerged {
                 into: "origin/main".to_string(),
             },
@@ -642,9 +659,17 @@ fn every_landed_variant_gets_its_own_sentence_and_never_a_bare_false() {
             "merge status unknown: no default branch to compare against",
         ),
     ];
-
-    for (index, (state, expected)) in landed.into_iter().enumerate() {
-        let mut report = checkout(&format!("/repos/app/w{index}"), &format!("branch-{index}"));
+    // Every variant renders into an otherwise identical digest — same path,
+    // same branch, same commit — so the whole rendered report differs only by
+    // the landed clause, and comparing reports *is* comparing the sentences.
+    // Collecting the expectations instead would only prove the author typed
+    // eight distinct literals, and it would miss the case that matters:
+    // `"merged into origin/main"` is a substring of `"not merged into
+    // origin/main"`, so `Merged` collapsing into `NotMerged` satisfies
+    // `contains` on its own.
+    let mut rendered = Vec::new();
+    for (state, expected) in landed {
+        let mut report = checkout("/repos/app/w", "branch");
         report.landed = state;
         let report = with_commits(
             report,
@@ -659,9 +684,19 @@ fn every_landed_variant_gets_its_own_sentence_and_never_a_bare_false() {
         let digest = digest(vec![repo("app", vec![alone(report)])], Vec::new());
 
         let report = plain(&digest);
-        assert!(flatten(&report).contains(expected), "{report}");
+        let flat = flatten(&report);
+        assert!(flat.contains(expected), "{report}");
         assert!(!report.contains("false"), "{report}");
         assert!(!md(&digest).contains("false"), "{}", md(&digest));
+        rendered.push(flat);
+    }
+
+    // A patch match is evidence and containment is proof, so the two must not
+    // reach the reader in the same words. Nor may any other pair collapse.
+    for (index, one) in rendered.iter().enumerate() {
+        for other in rendered.iter().skip(index + 1) {
+            assert_ne!(one, other, "two landed states rendered identically");
+        }
     }
 }
 
@@ -1223,6 +1258,49 @@ fn json_pins_its_top_level_keys_and_its_schema_version() {
     // `CheckoutReport` is flattened into the checkout, not nested under a key.
     assert!(value["repos"][0]["checkouts"][0]["path"].is_string());
     assert_eq!(value["notes"][0]["severity"], "info");
+}
+
+/// The nested tag a script reads to tell a squash landing from an exact one,
+/// and the sha it reads to check the claim by hand.
+///
+/// `landed.how` is a tagged enum inside a tagged enum, which is the one shape
+/// nothing else in the JSON has, and the sha lives at `landed.how.oid` rather
+/// than beside `kind`.
+#[test]
+fn json_carries_the_matched_trunk_sha_for_an_equivalent_landing() {
+    let mut report = checkout("/repos/app/w", "feature/squashed");
+    report.landed = Landed::Equivalent {
+        into: "origin/main".to_string(),
+        how: Equivalence::Squashed {
+            oid: "6df5ff43f499b52033c34557418e036589a1854c".to_string(),
+        },
+    };
+    let squashed = digest(vec![repo("app", vec![alone(report)])], Vec::new());
+    let value: serde_json::Value = serde_json::from_str(&json(&squashed).unwrap()).unwrap();
+    let landed = &value["repos"][0]["checkouts"][0]["landed"];
+
+    assert_eq!(landed["kind"], "equivalent");
+    assert_eq!(landed["into"], "origin/main");
+    assert_eq!(landed["how"]["kind"], "squashed");
+    assert_eq!(
+        landed["how"]["oid"],
+        "6df5ff43f499b52033c34557418e036589a1854c"
+    );
+
+    // The other reading carries a count and no sha, because no single trunk
+    // commit is the one that matched.
+    let mut report = checkout("/repos/app/w", "feature/rebased");
+    report.landed = Landed::Equivalent {
+        into: "origin/main".to_string(),
+        how: Equivalence::EveryCommit { commits: 3 },
+    };
+    let rebased = digest(vec![repo("app", vec![alone(report)])], Vec::new());
+    let value: serde_json::Value = serde_json::from_str(&json(&rebased).unwrap()).unwrap();
+    let landed = &value["repos"][0]["checkouts"][0]["landed"];
+
+    assert_eq!(landed["how"]["kind"], "every_commit");
+    assert_eq!(landed["how"]["commits"], 3);
+    assert!(landed["how"]["oid"].is_null());
 }
 
 #[test]

@@ -18,6 +18,10 @@ with the experiment that produced them.
    locale.
 5. Resolve the `git` binary explicitly. herdr runs plugin commands with **no
    shell and a minimal `PATH`**.
+6. Set `GIT_NO_LAZY_FETCH=1`. In a partial clone git satisfies a missing blob by
+   fetching it from the promisor remote and **writing it into the repository**,
+   which breaks both the read-only promise and the no-network one. Refusing it
+   turns that into an ordinary non-zero exit, which every caller reports.
 
 ## The flag does not cover `diff`
 
@@ -239,6 +243,133 @@ tried in order.
 If no default branch can be identified, the verdict is **unknown, with the
 reason**, never a bare "not merged". The two mean very different things to
 somebody deciding whether a branch is safe to delete.
+
+### Exit 1 is not "did not land"
+
+Containment is exact for a fast-forward and for a merge commit, and it is the
+wrong question for a squash merge or a rebase merge: both rewrite the commit, so
+the sha the checkout holds never appears on the trunk. Squash merging is the
+default on a great many forges, so an exit of 1 is not the answer — it is where
+two more probes start.
+
+Measured on git 2.53.0, against a three-commit branch squash-merged onto a trunk
+that had gained a commit of its own since the fork point, and against the same
+branch replayed commit by commit:
+
+| probe | squash merge | rebase merge |
+|---|---|---|
+| `merge-base --is-ancestor` | exit 1 | exit 1 |
+| `git cherry main topic` | `+ + +` | `- -` |
+| combined diff patch id | `450e3211…` → `6df5ff43…` on `main` | no match |
+
+Neither probe alone covers both shapes, so both are run, cheapest first:
+
+```sh
+git -C <wt> --no-optional-locks merge-base <head> <default>
+git -C <wt> --no-optional-locks cherry <default> <head>
+git -C <wt> --no-optional-locks diff-tree -p -U3 --src-prefix=a/ --dst-prefix=b/ \
+    --no-renames --no-textconv <base> <head> | git patch-id --stable
+git -C <wt> --no-optional-locks log -p -U3 --src-prefix=a/ --dst-prefix=b/ \
+    --no-renames --no-textconv --no-merges --format='commit %H' \
+    <base>..<default> | git patch-id --stable
+```
+
+`git cherry` prints `-` for a commit whose patch is already upstream and `+` for
+one that is not, so nothing but `-` means every commit arrived by another route.
+That is what a rebase merge leaves, and what a squash of a single commit leaves.
+A squash of more than one commit destroys every individual patch id, and the id
+that does survive is the branch's **combined** diff against the fork point —
+which is exactly the diff the squash commit carries. Unrelated histories have no
+fork point, `merge-base` says so with exit 1, and neither probe runs.
+
+### The diff options are pinned, and that is the load-bearing part
+
+`git patch-id` hashes the diff it is handed, so two diffs of the same change
+hash differently when they were produced with different options. The two
+commands above do not read the same configuration: **`diff-tree` is plumbing**
+and takes git's basic diff config, **`log` is porcelain** and takes the UI
+config on top of it. Since standup deliberately does not scrub `HOME` or
+`GIT_CONFIG_GLOBAL`, that is the reader's own `~/.gitconfig`.
+
+Measured on git 2.53.0, replaying these exact invocations against a
+three-commit branch squash-merged onto a moved-on trunk. With an empty global
+config the squash is found. With any one of these in the reader's config, only
+the `log` side moved, and every squash merge on that machine went back to
+reading as "not merged" — this bug, restored by a setting that has nothing to do
+with merging:
+
+| config | unpinned verdict | pinned by |
+|---|---|---|
+| `diff.noprefix = true` | `NotMerged` | `--src-prefix`, `--dst-prefix` |
+| `diff.srcPrefix`, `diff.dstPrefix` | `NotMerged` | `--src-prefix`, `--dst-prefix` |
+| `diff.mnemonicPrefix = true` | `NotMerged` | `--src-prefix`, `--dst-prefix` |
+| `diff.context = 5` | `NotMerged` | `-U3` |
+| `diff.renames = copies` | `NotMerged` | `--no-renames` |
+| `format.pretty` | ids attributed to nothing | `--format='commit %H'` |
+
+Two more that are not about symmetry:
+
+- **`--stable`** hashes each file independently, so an id does not depend on the
+  order git happened to emit the files in. `diff-tree` and `log` need not agree
+  on that order.
+- **`--no-merges`**, because a merge commit prints a header and no diff under
+  `log -p`, which would hand the next commit's patch to the wrong sha. It is the
+  same hazard `--format` guards from the other side.
+
+`tests/git_collect.rs` writes every one of those settings into a fixture's own
+repository config and asserts the squash is still found, so the pinning cannot
+be dropped without a red test — and the test uses forty-line files edited in the
+middle, because a one-line file is shorter than any plausible `diff.context` and
+would produce identical output either way.
+
+### Read-only, and no network
+
+`diff-tree` and `log -p` compare commits, so unlike `diff --shortstat` they
+never read the working tree or refresh the index and they need no
+`GIT_INDEX_FILE` copy. `patch-id` is a filter and reads only its stdin.
+`tests/read_only.rs` runs the whole pipeline under its fingerprint: the
+kitchen-sink fixture carries a squash-merged worktree precisely for that.
+
+There is one way these commands *would* write. In a `--filter=blob:none` or
+treeless **partial clone** the blobs a diff needs are not present, and git's
+answer is to fetch them from the promisor remote and write them into
+`.git/objects`. Measured on git 2.53.0: a blobless clone went from 8 object
+files to 12 after one `log -p` over a trunk range. That is both a write and a
+network call, and standup promises neither, so every invocation in the module
+runs with `GIT_NO_LAZY_FETCH=1`. The command then exits 128 with
+`could not fetch <oid> from promisor remote`, which is reported — verified on a
+real blobless clone: zero objects written, and the verdict comes back as
+`merge status unknown` naming the failing command rather than as `not merged`.
+
+The pipeline is a **real pipe**, not a buffer. `log -p` over a trunk range is
+the largest thing this module ever asks git for — roughly 175 KiB of patch text
+per commit, so an 800-commit range is 140 MB — and buffering that in the plugin
+only to hand it to `patch-id` would be an unbounded allocation per checkout.
+Piped, the only thing held is `patch-id`'s answer, at 82 bytes per commit.
+**Both** exit statuses are checked: a source that dies partway leaves `patch-id`
+exiting 0 over a truncated stream, and "the ids I found do not include yours"
+must not be mistaken for "the patch is not there".
+
+### Three answers, not two
+
+A match is reported as its own state and never as `Merged`. Two commits with the
+same diff have the same patch id, so this is strong evidence and not proof, and
+the digest says which of the two it holds: `merged into main` for containment,
+`on main by patch as <sha>, not by sha` for a squash, and `every commit is on
+main by patch, not by sha` for a rebase.
+
+And a probe that could not be *asked* is not an answer either. "The patch is not
+on the trunk" and "the probe failed" are the same `NotMerged` if they are allowed
+to share a return, which would make a shallow clone, a corrupt pack or a refused
+promisor fetch render identically to work that genuinely never landed. So
+anything but a clean exit from `cherry`, `diff-tree`, `log` or `patch-id`
+becomes `merge status unknown` with the command and its stderr attached — the
+same discipline the missing-default-branch case already had.
+
+The cost is the range `git cherry` already walks; it builds a patch-id map of
+the upstream side to do its own job, so the second probe is the same order of
+work rather than a new one. Both are bounded by the module's per-invocation
+deadline, which records a problem rather than guessing.
 
 ## Degenerate states
 
