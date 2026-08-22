@@ -18,10 +18,6 @@ with the experiment that produced them.
    locale.
 5. Resolve the `git` binary explicitly. herdr runs plugin commands with **no
    shell and a minimal `PATH`**.
-6. Set `GIT_NO_LAZY_FETCH=1`. In a partial clone git satisfies a missing blob by
-   fetching it from the promisor remote and **writing it into the repository**,
-   which breaks both the read-only promise and the no-network one. Refusing it
-   turns that into an ordinary non-zero exit, which every caller reports.
 
 ## The flag does not cover `diff`
 
@@ -322,33 +318,35 @@ be dropped without a red test — and the test uses forty-line files edited in t
 middle, because a one-line file is shorter than any plausible `diff.context` and
 would produce identical output either way.
 
-### Read-only, and no network
+### Read-only
 
 `diff-tree` and `log -p` compare commits, so unlike `diff --shortstat` they
 never read the working tree or refresh the index and they need no
-`GIT_INDEX_FILE` copy. `patch-id` is a filter and reads only its stdin.
+`GIT_INDEX_FILE` copy. `patch-id` is a filter and reads only its stdin, which is
+buffered and written to it rather than joined by a pipe — that keeps the deadline
+and the pipe draining in one place, and it means the source's exit status is
+checked *before* the sink ever runs. Piped, a source that died partway would
+leave `patch-id` exiting 0 over a truncated stream, and "the ids I found do not
+include yours" must never be mistaken for "the patch is not there".
+
 `tests/read_only.rs` runs the whole pipeline under its fingerprint: the
 kitchen-sink fixture carries a squash-merged worktree precisely for that.
 
-There is one way these commands *would* write. In a `--filter=blob:none` or
-treeless **partial clone** the blobs a diff needs are not present, and git's
-answer is to fetch them from the promisor remote and write them into
-`.git/objects`. Measured on git 2.53.0: a blobless clone went from 8 object
-files to 12 after one `log -p` over a trunk range. That is both a write and a
-network call, and standup promises neither, so every invocation in the module
-runs with `GIT_NO_LAZY_FETCH=1`. The command then exits 128 with
-`could not fetch <oid> from promisor remote`, which is reported — verified on a
-real blobless clone: zero objects written, and the verdict comes back as
-`merge status unknown` naming the failing command rather than as `not merged`.
+Two known limits, both filed rather than fixed here, because both are about
+cost or about a repository shape rather than about the answer:
 
-The pipeline is a **real pipe**, not a buffer. `log -p` over a trunk range is
-the largest thing this module ever asks git for — roughly 175 KiB of patch text
-per commit, so an 800-commit range is 140 MB — and buffering that in the plugin
-only to hand it to `patch-id` would be an unbounded allocation per checkout.
-Piped, the only thing held is `patch-id`'s answer, at 82 bytes per commit.
-**Both** exit statuses are checked: a source that dies partway leaves `patch-id`
-exiting 0 over a truncated stream, and "the ids I found do not include yours"
-must not be mistaken for "the patch is not there".
+- Buffering the diff is an allocation with no bound on it. `log -p` over a trunk
+  range is the largest thing this module asks git for — roughly 175 KiB of patch
+  text per commit, so an 800-commit range is 140 MB — and a stale branch on a
+  busy trunk pays that per checkout. The natural fix is the caching in the
+  roadmap's "Cache plumbing results" entry rather than a second pipe here.
+- In a `--filter=blob:none` or treeless **partial clone** the blobs a diff needs
+  are absent, and git's answer is to fetch them from the promisor remote and
+  write them into `.git/objects` — measured on git 2.53.0, a blobless clone went
+  from 8 object files to 12 after one `log -p` over a trunk range. That is a
+  write and a network call from a plugin that promises neither. It is not new
+  with these probes: `log --numstat` has always needed the same blobs. It has
+  its own issue.
 
 ### Three answers, not two
 

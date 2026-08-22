@@ -89,7 +89,7 @@
 //! paths arrive as raw bytes rather than C-quoted, so a filename containing a
 //! space, a newline or a non-UTF-8 byte survives.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -961,7 +961,7 @@ impl Git {
         // *combined* diff against the fork point, which is exactly the diff the
         // squash commit carries.
         let Some((wanted, _)) = self
-            .patch_ids(path, &diff_args(&["diff-tree", &base, oid]))?
+            .patch_ids(path, &diff_args(&["diff-tree", &base, oid]), problems)?
             .into_iter()
             .next()
         else {
@@ -986,6 +986,7 @@ impl Git {
                     "--format=commit %H",
                     &range,
                 ]),
+                problems,
             )?
             .into_iter()
             .find(|(id, _)| *id == wanted)
@@ -1013,81 +1014,57 @@ impl Git {
         }
     }
 
-    /// `git <args> | git patch-id --stable`, as `(patch id, commit)` pairs.
-    ///
-    /// A real pipe rather than a buffer. `log -p` over the trunk range is the
-    /// largest thing this module ever asks git for — measured at roughly
-    /// 175 KiB of patch text per commit, so an 800-commit range is 140 MB — and
-    /// holding all of that in this process only to hand it to the next command
-    /// would be an avoidable allocation with no bound on its size. Piped, the
-    /// only thing buffered is `patch-id`'s answer, at 82 bytes per commit.
+    /// `<args> | git patch-id --stable`, as `(patch id, commit)` pairs.
     ///
     /// `--stable` rather than the default, because it hashes each file
     /// independently: the id then does not depend on the order git happened to
     /// emit the files in, and `diff-tree` and `log` need not agree on that.
     ///
-    /// **Both** exit statuses are checked, and that is what the `Err` is for. A
-    /// source that dies partway leaves `patch-id` exiting 0 over a truncated
-    /// stream, so "the ids I found do not include yours" would be
-    /// indistinguishable from "the patch is not on the trunk" — the one
-    /// distinction [`Git::equivalent_patch`] exists to keep.
+    /// The diff is buffered and handed to `patch-id` on stdin rather than joined
+    /// to it by a pipe, and the reason is the exit status. Buffered, the source's
+    /// status is checked *before* the sink ever runs; piped, a source that died
+    /// partway would leave `patch-id` exiting 0 over a truncated stream, and
+    /// "the ids I found do not include yours" must never be mistaken for "the
+    /// patch is not on the trunk" — the one distinction
+    /// [`Git::equivalent_patch`] exists to keep. It also keeps the deadline and
+    /// the pipe draining in [`Git::run_env`] instead of duplicating both. The
+    /// buffer is moved, not copied: it is the source's own captured stdout.
+    ///
+    /// The cost of that buffer on a stale branch of a busy trunk is real and is
+    /// filed separately; it is a question about speed, not about the answer.
     fn patch_ids(
         &self,
         dir: &Path,
         args: &[&str],
+        problems: &mut Vec<String>,
     ) -> std::result::Result<Vec<(String, String)>, String> {
         let name = args.first().copied().unwrap_or("?");
-        let mut source = self
-            .command(dir, args, &[], Stdio::null())
-            .spawn()
-            .map_err(|err| format!("could not run git {name} in {}: {err}", dir.display()))?;
-        // Drained from the moment it exists. The source writes its diagnostics
-        // while the sink is still reading its diff, and a full stderr pipe
-        // stalls a child exactly as a full stdout pipe does.
-        let source_err = drain(source.stderr.take().expect("stderr is piped"));
-        let feed = source.stdout.take().expect("stdout is piped");
-
-        let mut sink = self
-            .command(dir, &["patch-id", "--stable"], &[], Stdio::from(feed))
-            .spawn()
-            .map_err(|err| format!("could not run git patch-id in {}: {err}", dir.display()))?;
-        let ids = drain(sink.stdout.take().expect("stdout is piped"));
-        let sink_err = drain(sink.stderr.take().expect("stderr is piped"));
-
-        // The sink first: it ends when the source closes its stdout, so waiting
-        // on it waits for the source's work too. Killing it on the deadline
-        // breaks the pipe, which is what brings the source down after it.
-        let sink_wait = self.wait_for(&mut sink, dir, "patch-id");
-        let source_wait = self.wait_for(&mut source, dir, name);
-        let source_err = String::from_utf8_lossy(&source_err.join().unwrap_or_default())
-            .trim()
-            .to_string();
-        let sink_err = String::from_utf8_lossy(&sink_err.join().unwrap_or_default())
-            .trim()
-            .to_string();
-
-        let (source_code, source_timed_out) = source_wait.map_err(|err| err.to_string())?;
-        let (sink_code, sink_timed_out) = sink_wait.map_err(|err| err.to_string())?;
-        if source_timed_out || sink_timed_out {
-            return Err(format!(
-                "git {name} | git patch-id timed out after {:?}",
-                self.timeout
-            ));
+        let diff = match self.capture(dir, args, problems) {
+            Some(out) if out.ok() => out.stdout,
+            Some(out) => {
+                return Err(format!(
+                    "git {name} exited {}: {}",
+                    exit_label(out.code),
+                    out.stderr_text()
+                ))
+            }
+            None => return Err(format!("git {name} could not be run")),
+        };
+        if diff.is_empty() {
+            return Ok(Vec::new());
         }
-        if source_code != Some(0) {
-            return Err(format!(
-                "git {name} exited {}: {source_err}",
-                exit_label(source_code)
-            ));
-        }
-        if sink_code != Some(0) {
-            return Err(format!(
-                "git patch-id exited {}: {sink_err}",
-                exit_label(sink_code)
-            ));
-        }
-
-        Ok(String::from_utf8_lossy(&ids.join().unwrap_or_default())
+        let ids = match self.capture_stdin(dir, &["patch-id", "--stable"], diff, problems) {
+            Some(out) if out.ok() => out.stdout_text(),
+            Some(out) => {
+                return Err(format!(
+                    "git patch-id exited {}: {}",
+                    exit_label(out.code),
+                    out.stderr_text()
+                ))
+            }
+            None => return Err("git patch-id could not be run".to_string()),
+        };
+        Ok(ids
             .lines()
             .filter_map(|line| {
                 let mut fields = line.split_whitespace();
@@ -1147,7 +1124,7 @@ impl Git {
     /// problems on the report. A non-zero exit is handed back for the caller to
     /// interpret, because for most of these commands it is an answer.
     fn capture(&self, dir: &Path, args: &[&str], problems: &mut Vec<String>) -> Option<GitOut> {
-        self.capture_env(dir, args, &[], problems)
+        self.capture_full(dir, args, &[], None, problems)
     }
 
     /// [`Git::capture`] with extra environment, used only to point
@@ -1159,7 +1136,30 @@ impl Git {
         extra_env: &[(&str, &Path)],
         problems: &mut Vec<String>,
     ) -> Option<GitOut> {
-        match self.run_env(dir, args, extra_env) {
+        self.capture_full(dir, args, extra_env, None, problems)
+    }
+
+    /// [`Git::capture`] with a diff on stdin, used only to feed
+    /// [`Git::patch_ids`].
+    fn capture_stdin(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        stdin: Vec<u8>,
+        problems: &mut Vec<String>,
+    ) -> Option<GitOut> {
+        self.capture_full(dir, args, &[], Some(stdin), problems)
+    }
+
+    fn capture_full(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        extra_env: &[(&str, &Path)],
+        stdin: Option<Vec<u8>>,
+        problems: &mut Vec<String>,
+    ) -> Option<GitOut> {
+        match self.run_full(dir, args, extra_env, stdin) {
             Ok(out) if out.timed_out => {
                 problems.push(format!(
                     "git {} timed out after {:?} in {}",
@@ -1203,54 +1203,39 @@ impl Git {
     }
 
     /// One invocation, with a hard deadline.
-    fn run(&self, dir: &Path, args: &[&str]) -> Result<GitOut> {
-        self.run_env(dir, args, &[])
-    }
-
-    /// [`Git::run`], with extra environment applied *after* the inherited
-    /// environment is scrubbed.
-    fn run_env(&self, dir: &Path, args: &[&str], extra_env: &[(&str, &Path)]) -> Result<GitOut> {
-        let mut child = self
-            .command(dir, args, extra_env, Stdio::null())
-            .spawn()
-            .map_err(|err| {
-                format!(
-                    "could not run {} in {}: {err}",
-                    self.program.display(),
-                    dir.display()
-                )
-            })?;
-        let out = drain(child.stdout.take().expect("stdout is piped"));
-        let err = drain(child.stderr.take().expect("stderr is piped"));
-        let (code, timed_out) =
-            self.wait_for(&mut child, dir, args.first().copied().unwrap_or("?"))?;
-        Ok(GitOut {
-            code,
-            stdout: out.join().unwrap_or_default(),
-            stderr: err.join().unwrap_or_default(),
-            timed_out,
-        })
-    }
-
-    /// The command every invocation in this module is built from: the read-only
-    /// flag, a scrubbed environment, and both output streams piped.
     ///
-    /// Callers choose stdin because [`Git::patch_ids`] hands one child's stdout
-    /// to the next; everything else has nothing to say and gets `/dev/null`.
-    fn command(
+    /// A hung git — a stuck credential helper, a stalled network filesystem, an
+    /// fsmonitor that never answers — must not hang the digest, so the child is
+    /// polled and killed on expiry. The pipes are drained on their own threads:
+    /// a child that fills the 64 KiB pipe buffer blocks forever otherwise, and
+    /// `log --numstat` over a busy day comfortably exceeds that.
+    fn run(&self, dir: &Path, args: &[&str]) -> Result<GitOut> {
+        self.run_full(dir, args, &[], None)
+    }
+
+    /// [`Git::run`], with environment this module sets on purpose applied
+    /// *after* the inherited environment is scrubbed, and an optional payload
+    /// on the child's stdin.
+    fn run_full(
         &self,
         dir: &Path,
         args: &[&str],
         extra_env: &[(&str, &Path)],
-        stdin: Stdio,
-    ) -> Command {
+        stdin: Option<Vec<u8>>,
+    ) -> Result<GitOut> {
         let mut command = Command::new(&self.program);
         command.arg("-C").arg(dir);
         // Global, before the subcommand: plain `status` takes `index.lock` to
         // write back its stat cache, and this plugin promises never to write.
         command.arg("--no-optional-locks");
         command.args(args);
-        command.stdin(stdin);
+        // Nothing here reads a terminal, so the default is a closed stdin; the
+        // one command that takes a payload is `patch-id`.
+        command.stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
@@ -1279,14 +1264,6 @@ impl Git {
         // an http remote can block forever asking for a password.
         command.env("GIT_TERMINAL_PROMPT", "0");
         command.env("GIT_PAGER", "cat");
-        // A blobless or treeless partial clone has no blobs to diff, and git's
-        // answer to that is to fetch them from the promisor remote and **write
-        // them into the user's repository**. Measured on git 2.53.0: one
-        // `log -p` over a trunk range took a blobless clone from 8 object files
-        // to 12. This plugin promises no writes and no network, so the fetch is
-        // refused; the command then exits non-zero, which every caller reports
-        // rather than reading as data.
-        command.env("GIT_NO_LAZY_FETCH", "1");
         // Everything parsed here is machine output, and a localised git would
         // translate the words this module keys off.
         command.env("LC_ALL", "C");
@@ -1294,45 +1271,91 @@ impl Git {
         for (key, value) in extra_env {
             command.env(key, value);
         }
-        command
-    }
 
-    /// Polls a child to a hard deadline, killing it on expiry. Hands back the
-    /// exit code and whether the deadline fired.
-    ///
-    /// A hung git — a stuck credential helper, a stalled network filesystem, an
-    /// fsmonitor that never answers — must not hang the digest. Nothing may
-    /// block between spawning a child and getting here, which is why the pipes
-    /// are drained on their own threads: a child that fills the 64 KiB pipe
-    /// buffer blocks forever otherwise, and `log --numstat` over a busy day
-    /// comfortably exceeds that.
-    fn wait_for(
-        &self,
-        child: &mut std::process::Child,
-        dir: &Path,
-        name: &str,
-    ) -> Result<(Option<i32>, bool)> {
+        let mut child = command.spawn().map_err(|err| {
+            format!(
+                "could not run {} in {}: {err}",
+                self.program.display(),
+                dir.display()
+            )
+        })?;
+
+        let mut out_pipe = child.stdout.take().expect("stdout is piped");
+        let mut err_pipe = child.stderr.take().expect("stderr is piped");
+        let out_reader = std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = out_pipe.read_to_end(&mut buffer);
+            buffer
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = err_pipe.read_to_end(&mut buffer);
+            buffer
+        });
+
+        // On its own thread, for the same reason the readers are on theirs: the
+        // deadline below only has teeth if nothing above it can block forever,
+        // and a child that stops reading its stdin would otherwise hang the
+        // digest — the one thing this runner exists to prevent. Dropping the
+        // pipe at the end of the closure closes it, which is what tells the
+        // child the diff has ended.
+        let writer = stdin.map(|payload| {
+            let mut pipe = child.stdin.take().expect("stdin is piped");
+            std::thread::spawn(move || pipe.write_all(&payload))
+        });
+
         let deadline = Instant::now() + self.timeout;
         let mut backoff = Duration::from_micros(200);
-        loop {
+        let mut timed_out = false;
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(status)) => return Ok((status.code(), false)),
+                Ok(Some(status)) => break status,
                 Ok(None) => {
                     if Instant::now() >= deadline {
+                        timed_out = true;
                         let _ = child.kill();
-                        let status = child.wait().map_err(|err| err.to_string())?;
-                        return Ok((status.code(), true));
+                        break child.wait().map_err(|err| err.to_string())?;
                     }
                     std::thread::sleep(backoff);
                     backoff = (backoff * 2).min(Duration::from_millis(5));
                 }
-                Err(err) => {
-                    return Err(
-                        format!("waiting for git {name} in {}: {err}", dir.display()).into(),
+                Err(err) => return Err(format!("waiting for git: {err}").into()),
+            }
+        };
+
+        // The child exiting for any reason breaks the pipe, so this join cannot
+        // outlive the wait above. Any failed write is then reported, including a
+        // broken pipe: `patch-id` reads its stdin to EOF, so it cannot have
+        // stopped early and still be right, and a short write would leave it
+        // hashing a truncated diff and answering confidently. A confident wrong
+        // answer is the one outcome this module never permits. A killed child is
+        // the exception, already spoken for by `timed_out`.
+        if let Some(writer) = writer {
+            let wrote = writer.join().map_err(|_| {
+                format!(
+                    "the thread feeding git {} in {} panicked",
+                    args.first().copied().unwrap_or("?"),
+                    dir.display()
+                )
+            })?;
+            if let Err(err) = wrote {
+                if !timed_out {
+                    return Err(format!(
+                        "could not feed git {} in {}: {err}",
+                        args.first().copied().unwrap_or("?"),
+                        dir.display()
                     )
+                    .into());
                 }
             }
         }
+
+        Ok(GitOut {
+            code: status.code(),
+            stdout: out_reader.join().unwrap_or_default(),
+            stderr: err_reader.join().unwrap_or_default(),
+            timed_out,
+        })
     }
 }
 
@@ -1584,17 +1607,6 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable(path: &Path) -> bool {
     path.is_file()
-}
-/// Drains a child's pipe on its own thread.
-///
-/// A child that fills the 64 KiB pipe buffer blocks forever if nobody reads,
-/// and every deadline in this module depends on nothing blocking before it.
-fn drain<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = pipe.read_to_end(&mut buffer);
-        buffer
-    })
 }
 
 /// How a child ended, in words: a process killed by a signal has no code, and

@@ -54,22 +54,12 @@ All notable changes to this project are recorded here. The format follows
   answered and `landed.how.oid` naming the trunk commit that matched. Nothing
   that was already exact changed; a branch only partly cherry-picked onto the
   trunk still reads as not merged; and a probe that could not be *run* — a
-  shallow clone, a missing object, a refused promisor fetch — is reported as
-  `merge status unknown` with the command and its stderr, never as a verdict.
-  The two diffs a patch id is computed from are produced with the diff options
-  pinned explicitly, because `diff-tree` reads git's basic diff config while
-  `log` also reads the UI config: unpinned, a reader's own `diff.noprefix`,
-  `diff.context` or `diff.srcPrefix` silently reinstated the whole bug.
-- Every git invocation now sets `GIT_NO_LAZY_FETCH=1`. In a `--filter=blob:none`
-  or treeless partial clone, the blobs a diff needs are absent, and git's answer
-  is to fetch them from the promisor remote and write them into `.git/objects` —
-  a write and a network call from a plugin whose two standing promises are that
-  it does neither. Measured: a blobless clone gained four object files from one
-  diff over a trunk range. The fetch is now refused, so such a repository
-  reports a problem naming the object it could not read instead of quietly
-  growing. **On a partial clone, line counts and merge status that previously
-  appeared will now be reported as unavailable.** That is the honest answer; if
-  it matters to you, say so on the issue tracker.
+  shallow clone, a missing object — is reported as `merge status unknown` with
+  the command and its stderr, never as a verdict. The two diffs a patch id is
+  computed from are produced with the diff options pinned explicitly, because
+  `diff-tree` reads git's basic diff config while `log` also reads the UI config:
+  unpinned, a reader's own `diff.noprefix`, `diff.context` or `diff.srcPrefix`
+  silently reinstated the whole bug.
 
 ## [0.1.0] - 2026-08-16
 
