@@ -365,16 +365,32 @@ pub(crate) fn agent_label(agent: &AgentRef) -> Option<String> {
     }
 }
 
-/// Who to credit: the agents herdr saw here, or failing that the commit
+/// Who to credit: the agents herdr placed here, or failing that the commit
 /// authors. A sibling worktree whose workspace was closed has no agents left,
 /// and "somebody committed this" is still worth saying.
+///
+/// Agents that share a label are counted rather than repeated. Two unnamed
+/// `claude` agents in one checkout are two agents, and `claude, claude` reads
+/// like a bug where `claude ×2` reads like the fact it is.
 pub(crate) fn attribution(checkout: &CheckoutDigest) -> Option<(&'static str, String)> {
-    let agents: Vec<String> = checkout
-        .agents()
-        .iter()
-        .filter_map(|a| agent_label(a))
-        .collect();
-    if !agents.is_empty() {
+    let mut labelled: Vec<(String, usize)> = Vec::new();
+    for agent in &checkout.agents {
+        let Some(label) = agent_label(agent) else {
+            continue;
+        };
+        match labelled.iter_mut().find(|(seen, _)| *seen == label) {
+            Some((_, count)) => *count += 1,
+            None => labelled.push((label, 1)),
+        }
+    }
+    if !labelled.is_empty() {
+        let agents: Vec<String> = labelled
+            .into_iter()
+            .map(|(label, count)| match count {
+                1 => label,
+                many => format!("{label} \u{d7}{many}"),
+            })
+            .collect();
         return Some(("agents", agents.join(", ")));
     }
     let authors = checkout.report.authors();

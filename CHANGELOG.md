@@ -60,6 +60,23 @@ All notable changes to this project are recorded here. The format follows
   `diff-tree` reads git's basic diff config while `log` also reads the UI config:
   unpinned, a reader's own `diff.noprefix`, `diff.context` or `diff.srcPrefix`
   silently reinstated the whole bug.
+- Agents are credited to the checkout they actually worked in. herdr reports
+  agents per workspace, and a workspace is not a place — its panes can sit in
+  different checkouts — so a workspace-scoped roster credited every agent with
+  work in every directory the workspace touched, and two agents in one window
+  collapsed into one because attribution was deduplicated by display name.
+  `agent` is `claude` on all but one row of a live nineteen-pane capture and
+  `name` is absent on three of eighteen, so two agents reading as one was the
+  normal case rather than the exotic one. Each agent now carries its own
+  directory, from the `cwd` its row already had, and is placed by it; two agents
+  in one checkout are two agents, and a repeated label is counted rather than
+  repeated, as `claude ×2`. Where herdr does not say which directory an agent was
+  in **and** its workspace spans more than one checkout, the answer is
+  unknowable: it is credited to none of them and the digest says so, naming the
+  workspace and the count. An agent with no directory whose workspace touches a
+  single checkout is still placed there, because there is nowhere else it could
+  have been. `--json` gains an `agents` array on each checkout, which is the
+  attribution; the existing `workspaces[].agents` stays the workspace roster.
 
 ## [0.1.0] - 2026-08-16
 

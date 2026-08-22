@@ -84,8 +84,3 @@ rather than leave the consumer to assume.
 
 The JSON is documented as being for scripting. A schema version, and a changelog
 entry when it moves, is what makes that safe to rely on.
-
-### Attribution when several agents share a checkout
-
-The agent name appears where herdr reports one. Two agents working the same
-checkout in one window currently collapse to whichever herdr reported last.
