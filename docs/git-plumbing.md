@@ -223,6 +223,38 @@ An upstream that is configured but does not resolve — the usual cause is a
 remote branch deleted after a merge — is reported as its own state, distinct
 from having no upstream at all.
 
+## What exists only here
+
+```sh
+git -C <wt> --no-optional-locks remote
+git -C <wt> --no-optional-locks rev-list --count HEAD --not --remotes
+```
+
+Reachable from HEAD, reachable from no remote-tracking ref: the commits a
+`worktree remove` would take with it. This is a different question from the
+`ahead` count above, and asking it needs saying why, because `ahead` looks like
+the same number.
+
+`ahead` is measured against the **one** configured upstream. It answers nothing
+at all when there is no upstream — which is precisely the branch whose every
+commit is only here, the case worth reporting most. `--remotes` spans every
+remote instead, so a branch pushed to a fork, or to a second remote, or under a
+different name, is correctly not counted as at risk. What is being asked is "is
+this anywhere else", not "is this on its upstream".
+
+The `remote` call first is not a formality. Without it, a repository with no
+remote configured counts its whole history as unpushed — literally true and
+useless, since there was never anywhere to push it. A digest that files every
+local-only scratch repository under "work at risk" buries the case this exists
+to surface, so that state is named separately and reported as nothing at risk.
+
+A count that cannot be read is recorded **twice**: as the state's reason, and as
+a problem on the report. That is not belt and braces. A checkout with no count
+has nothing to put on its `unpushed:` line, so without the problem beside it the
+checkout reads as quiet — and a quiet repository is summarised to its name, then
+dropped entirely when quiet ones are excluded. The failure would be invisible in
+exactly the digest that needed it.
+
 ## Did it land
 
 ```sh

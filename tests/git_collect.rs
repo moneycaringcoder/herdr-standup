@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use standup::git::Git;
-use standup::model::{Activity, Equivalence, Head, Landed, Tracking};
+use standup::model::{Activity, Equivalence, Head, Landed, Tracking, Unpushed};
 
 use fixtures::{
     window, window_between, Fixture, T_AFTER, T_IN1, T_IN2, T_IN3, T_OLD, T_OLDER, T_SINCE, T_UNTIL,
@@ -338,6 +338,129 @@ fn a_repository_whose_work_is_all_older_than_the_window_is_quiet_not_broken() {
     assert!(report.churn.is_zero());
     assert!(report.dirty.is_clean());
     assert_eq!(report.activity(), Activity::Quiet);
+}
+
+// ---------------------------------------------------------------------------
+// Unpushed
+// ---------------------------------------------------------------------------
+
+/// The third state, and the stake behind it.
+///
+/// A checkout holding commits that are on no remote is not quiet: removing the
+/// directory takes them with it. The second half of this test is the reason the
+/// state exists at all — it removes the checkout the way closing a workspace
+/// does, and shows that what the digest named is then reachable from nothing.
+#[test]
+fn unpushed_work_is_named_and_a_removed_checkout_takes_it_with_it() {
+    let fixture = Fixture::new("unpushed-removal");
+    fixture.fake_origin();
+    let path = fixture.unmerged_worktree("flying", "flying");
+    let oid = fixture.head_oid(&path);
+    let git = git();
+
+    let report = git.report(&id(&git, &path), &window());
+    assert_eq!(
+        report.unpushed,
+        Unpushed::Commits { count: 1 },
+        "{:?}",
+        report.problems
+    );
+
+    // What closing a finished workspace does: the worktree goes, and the branch
+    // that only it was using goes with it.
+    fixture.git(
+        &fixture.repo,
+        &["worktree", "remove", "--force", path.to_str().unwrap()],
+    );
+    fixture.git(&fixture.repo, &["branch", "-D", "flying"]);
+
+    let containing = fixture.git(
+        &fixture.repo,
+        &[
+            "for-each-ref",
+            &format!("--contains={oid}"),
+            "--format=%(refname)",
+        ],
+    );
+    assert!(
+        containing.is_empty(),
+        "the commit the digest warned about is still reachable from {containing}"
+    );
+}
+
+/// Work that is on a remote is not at risk, even when it is not on the trunk and
+/// not on this branch's own upstream. The question is every remote, not one.
+#[test]
+fn work_that_reached_a_remote_is_not_counted_as_unpushed() {
+    let fixture = Fixture::new("unpushed-pushed");
+    fixture.fake_origin();
+    let path = fixture.unmerged_worktree("flying", "flying");
+    // Published under a different name than the branch, which is what a fork or
+    // a second remote looks like from here: the sha is on a remote either way.
+    fixture.publish("elsewhere", "flying");
+    let git = git();
+
+    let report = git.report(&id(&git, &path), &window());
+    assert_eq!(
+        report.unpushed,
+        Unpushed::Commits { count: 0 },
+        "{:?}",
+        report.problems
+    );
+}
+
+/// A repository with no remote has nowhere to have pushed to, so it is not
+/// holding unpushed work — it is holding all of its work, which is a different
+/// sentence and not this one. Counting it would file every local-only scratch
+/// repository under "at risk" and bury the case worth reading.
+#[test]
+fn a_repository_with_no_remote_is_not_holding_unpushed_work() {
+    let fixture = Fixture::new("unpushed-no-remote");
+    fixture.write(&fixture.repo, "local.txt", "local\n");
+    fixture.commit_all_at(&fixture.repo, T_OLD + 60, "never going anywhere");
+    let git = git();
+
+    let report = git.report(&id(&git, &fixture.repo), &window());
+    assert_eq!(report.unpushed, Unpushed::NoRemote, "{:?}", report.problems);
+    assert_eq!(report.activity(), Activity::Quiet);
+}
+
+/// An unborn branch has committed nothing, so it is holding nothing — and
+/// `rev-list` would fail on the HEAD it does not have.
+#[test]
+fn an_unborn_branch_has_nothing_unpushed_and_no_problem_about_it() {
+    let fixture = Fixture::new("unpushed-unborn");
+    fixture.fake_origin();
+    let path = fixture.unborn_worktree("fresh", "fresh");
+    let git = git();
+
+    let report = git.report(&id(&git, &path), &window());
+    assert_eq!(report.unpushed, Unpushed::Commits { count: 0 });
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+}
+
+/// Unpushed work from before the window still counts. The window measures what
+/// came out of a day; this measures what would be lost with the directory, which
+/// has no window — and being filed under "quiet" is exactly how it stayed
+/// invisible.
+#[test]
+fn unpushed_work_older_than_the_window_is_not_quiet() {
+    let fixture = Fixture::new("unpushed-older");
+    fixture.fake_origin();
+    let path = fixture.worktree("stale", "stale");
+    fixture.write(&path, "stale.txt", "committed long ago, never pushed\n");
+    fixture.commit_all_at(&path, T_OLD + 60, "long before the window");
+    let git = git();
+
+    let report = git.report(&id(&git, &path), &window());
+    assert!(report.commits.is_empty(), "nothing in the window");
+    assert!(report.dirty.is_clean(), "nothing uncommitted");
+    assert_eq!(report.unpushed, Unpushed::Commits { count: 1 });
+    assert_eq!(
+        report.activity(),
+        Activity::Unpushed,
+        "a checkout that would lose work is not a quiet one"
+    );
 }
 
 #[test]

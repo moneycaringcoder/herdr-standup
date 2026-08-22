@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use standup::config::Config;
 use standup::model::{
     AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Equivalence, Head,
-    Landed, Note, RepoDigest, RepoKey, Stamp, Tracking, Window, WindowSource, WorkspaceRef,
-    SCHEMA_VERSION,
+    Landed, Note, RepoDigest, RepoKey, Stamp, Tracking, Unpushed, Window, WindowSource,
+    WorkspaceRef, SCHEMA_VERSION,
 };
 use standup::render::{json, markdown, text};
 
@@ -133,6 +133,7 @@ fn checkout(path: &str, branch: &str) -> CheckoutReport {
         landed: Landed::Unknown {
             reason: "no default branch to compare against".to_string(),
         },
+        unpushed: Unpushed::Commits { count: 0 },
         problems: Vec::new(),
     }
 }
@@ -846,6 +847,78 @@ fn a_checkout_with_no_workspace_left_still_credits_its_authors() {
     );
     let digest = digest(vec![repo("app", vec![alone(report)])], Vec::new());
     assert!(flatten(&plain(&digest)).contains("authors: Agent Smith"));
+}
+
+/// The three states either side of each other, in the words a reader scans for.
+///
+/// "The agent did nothing" and "the agent did a day of work and never committed
+/// it" already had their own words. The state between them — committed here and
+/// nowhere else — was filed under the first, so a checkout that would lose work
+/// if it were removed was summarised to its repository name and dropped
+/// entirely when quiet repositories were excluded.
+#[test]
+fn committed_but_unpushed_work_reads_as_neither_quiet_nor_uncommitted() {
+    // Names chosen not to contain any of the words under test, so a match is
+    // the state talking and not a branch name.
+    let sleeping = alone(checkout("/repos/app/sleeping", "sleeping"));
+
+    let mut holding = checkout("/repos/app/holding", "holding");
+    holding.unpushed = Unpushed::Commits { count: 2 };
+
+    let mut editing = checkout("/repos/app/editing", "editing");
+    editing.dirty = Dirty {
+        tracked_changed: 1,
+        ..Dirty::default()
+    };
+
+    let digest = digest(
+        vec![repo("app", vec![sleeping, alone(holding), alone(editing)])],
+        Vec::new(),
+    );
+
+    let flat = flatten(&plain(&digest));
+    assert!(
+        flat.contains("unpushed: 2 commits on no remote"),
+        "the state has to be named:\n{flat}"
+    );
+    assert!(flat.contains("uncommitted: 1 file changed"), "{flat}");
+    // Exactly one checkout is quiet, and it is not the one holding work.
+    assert_eq!(
+        flat.matches("quiet").count(),
+        1,
+        "a checkout that would lose work if it were removed is not quiet:\n{flat}"
+    );
+}
+
+/// A count that could not be read is neither silence nor a reassuring zero: the
+/// same failure is recorded on `problems`, which lifts the checkout out of
+/// "quiet" so it cannot be summarised down to its repository name.
+#[test]
+fn an_uncountable_unpushed_state_is_reported_rather_than_hidden() {
+    let mut report = checkout("/repos/app/w", "feature/one");
+    report.unpushed = Unpushed::Unknown {
+        reason: "git rev-list exited 128: bad revision".to_string(),
+    };
+    report.problems = vec![
+        "could not count the commits that exist only here: git rev-list exited 128: bad revision"
+            .to_string(),
+    ];
+    let digest = digest(vec![repo("app", vec![alone(report)])], Vec::new());
+
+    let flat = flatten(&plain(&digest));
+    assert!(
+        flat.contains("could not count the commits that exist only here"),
+        "{flat}"
+    );
+    assert!(flat.contains("bad revision"), "{flat}");
+    assert!(
+        !flat.contains("unpushed: 0"),
+        "a failure must never read as nothing at risk:\n{flat}"
+    );
+    assert!(
+        !flat.contains("quiet"),
+        "a checkout whose numbers are incomplete must not be summarised away:\n{flat}"
+    );
 }
 
 #[test]

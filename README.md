@@ -74,6 +74,7 @@ status, no CI, no generated prose. What the work *meant* is for whoever reads it
 - whether it has an upstream, and how far ahead or behind
 - **whether the work landed** on the repository's default branch — including under a new sha, which
   is all a squash or a rebase merge leaves behind
+- **commits that exist only here** — committed, on no remote, and gone with the directory
 - uncommitted work still sitting there, which is the difference between "the agent did nothing" and
   "the agent did a day of work and never committed it"
 - which agent was in the workspace, when herdr reports one

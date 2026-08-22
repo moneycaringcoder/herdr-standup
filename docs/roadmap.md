@@ -9,13 +9,6 @@ A feature that cannot meet that does not belong here.
 
 ## Correctness
 
-### Report committed but unpushed work
-
-The digest already separates "the agent did nothing" from "the agent did a day of
-work and never committed it", which is the surprise that matters most. There is a
-third state between them — committed locally, never pushed — that is invisible
-today and disappears just as completely when a checkout is removed.
-
 ### Exclude generated and vendored paths from line counts
 
 Lines added and removed are a proxy for effort, and a regenerated lockfile or a

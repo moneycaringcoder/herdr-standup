@@ -34,7 +34,7 @@ use std::path::Path;
 use crate::config::{Config, Format};
 use crate::model::{
     Activity, AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Equivalence,
-    Head, Landed, RepoDigest, Stamp, Tracking, Window, WindowSource,
+    Head, Landed, RepoDigest, Stamp, Tracking, Unpushed, Window, WindowSource,
 };
 use crate::Result;
 
@@ -317,6 +317,34 @@ pub(crate) fn dirty_sentence(dirty: &Dirty) -> Option<String> {
         parts.push(delta(dirty.insertions, dirty.deletions));
     }
     Some(format!("uncommitted: {}", parts.join(", ")))
+}
+
+/// Work that exists in this checkout and nowhere else.
+///
+/// `None` when there is none of it, and when there is no remote for it to have
+/// been pushed to — a repository nobody ever pushed is not holding work at risk
+/// of a failed push, and saying so of every local-only scratch repository would
+/// bury the case worth reading.
+///
+/// `None` for [`Unpushed::Unknown`] too, and that is not silence: `git.rs`
+/// records the same failure on `report.problems`, which every renderer is
+/// obliged to show and which lifts the checkout out of "quiet" so it cannot be
+/// summarised away. A second, weaker copy of it here would only compete with
+/// that one.
+///
+/// A line of its own rather than a clause, for the same reason uncommitted work
+/// gets one: both are present-tense facts about the directory rather than
+/// anything the window measured, and both are lost if the checkout is removed.
+/// That is the point of naming this state — it reads at a glance, next to the
+/// neighbour it used to be filed under.
+pub(crate) fn unpushed_sentence(unpushed: &Unpushed) -> Option<String> {
+    match unpushed {
+        Unpushed::Commits { count } if *count > 0 => Some(format!(
+            "unpushed: {} on no remote",
+            quantity(*count as usize, "commit", "commits")
+        )),
+        Unpushed::Commits { .. } | Unpushed::NoRemote | Unpushed::Unknown { .. } => None,
+    }
 }
 
 /// The three clauses describing one checkout's window, in reading order: what
@@ -672,6 +700,10 @@ pub(crate) fn branch_column(repo: &RepoDigest) -> usize {
 
 /// One word for a checkout with nothing to say. Used by both human formats so
 /// the quiet vocabulary is identical.
+///
+/// [`Activity::Unpushed`] deliberately has no word here: it has something to
+/// say, and `unpushed_sentence` says it. Giving it a quiet word would put it
+/// back under the label this state exists to escape.
 pub(crate) fn quiet_word(activity: Activity) -> Option<&'static str> {
     match activity {
         Activity::Quiet => Some("quiet"),

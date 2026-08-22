@@ -366,8 +366,14 @@ pub enum Equivalence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activity {
-    /// Nothing in the window and nothing uncommitted.
+    /// Nothing in the window, nothing uncommitted, and nothing that exists only
+    /// here.
     Quiet,
+    /// Nothing in the window, but commits that are on no remote. Between the two
+    /// neighbours on purpose: it is not a quiet checkout, because deleting it
+    /// would lose work, and it is less fragile than an uncommitted change,
+    /// because at least git is holding it.
+    Unpushed,
     /// Uncommitted changes but no commits in the window.
     Uncommitted,
     /// Commits in the window.
@@ -392,9 +398,50 @@ pub struct CheckoutReport {
     pub dirty: Dirty,
     pub tracking: Tracking,
     pub landed: Landed,
+    /// Work that exists in this checkout and nowhere else.
+    pub unpushed: Unpushed,
     /// Things that went wrong while reading this checkout. Non-empty means the
     /// numbers above are incomplete, and every renderer must show it.
     pub problems: Vec<String>,
+}
+
+/// Work that exists in this checkout and nowhere else.
+///
+/// "Committed but never pushed" is the third state between "the agent did
+/// nothing" and "the agent did a day of work and never committed it", and it
+/// disappears just as completely when a checkout is removed. The digest named
+/// the other two and left this one to be inferred from an `ahead` count that is
+/// not even reported when there is no upstream configured.
+///
+/// The question is deliberately about **every** remote rather than the one
+/// configured upstream, so work pushed to a fork still counts as safe. It is
+/// also deliberately not asked at all of a repository with no remote: there is
+/// nowhere for that work to have been pushed to, so "unpushed" is not a state it
+/// can be in, and reporting every commit of a local-only repository as at risk
+/// would bury the case this exists to surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Unpushed {
+    /// No remote is configured, so there is nowhere this could have been pushed.
+    NoRemote,
+    /// Commits reachable from HEAD and from none of the remote-tracking refs.
+    /// `0` means everything here is somewhere else too.
+    Commits { count: u64 },
+    /// The question could not be asked. Never `Commits { count: 0 }`, which
+    /// would read as "nothing is at risk" — the opposite of what is known.
+    Unknown { reason: String },
+}
+
+impl Unpushed {
+    /// How many commits would be lost with this directory. Zero whenever the
+    /// answer is not a count, because neither "no remote" nor "could not tell"
+    /// is evidence that something is at risk.
+    pub fn at_risk(&self) -> u64 {
+        match self {
+            Unpushed::Commits { count } => *count,
+            Unpushed::NoRemote | Unpushed::Unknown { .. } => 0,
+        }
+    }
 }
 
 impl CheckoutReport {
@@ -409,6 +456,12 @@ impl CheckoutReport {
             Activity::Active
         } else if !self.dirty.is_clean() {
             Activity::Uncommitted
+        } else if self.unpushed.at_risk() > 0 {
+            // Quiet in the window, and still holding work that is nowhere else.
+            // Filing this under "quiet" is what made it invisible: a quiet
+            // repository is summarised to its name, and `--include-quiet=false`
+            // drops it from the digest altogether.
+            Activity::Unpushed
         } else {
             Activity::Quiet
         }
