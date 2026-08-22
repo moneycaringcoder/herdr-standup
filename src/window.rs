@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::clock;
 use crate::config::{self, Config};
 use crate::git::Git;
-use crate::model::{Note, Stamp, Window, WindowSource};
+use crate::model::{Note, Period, Stamp, Window, WindowSource};
 use crate::Result;
 
 /// How close to the current instant a resolved window start has to be before it
@@ -45,9 +45,21 @@ pub fn resolve(
     let mut notes: Vec<Note> = Vec::new();
     let now = clock::now();
 
-    // Where the start comes from. Only `--since-last` with a marker on record
-    // arrives as an instant already; everything else is a spec git must parse.
-    let (source, recorded_start) = if config.since_last {
+    // Where the start comes from. A rollup and `--since-last` with a marker on
+    // record both arrive as an instant already; everything else is a spec git
+    // must parse.
+    let (source, recorded_start) = if let Some(period) = config.rollup {
+        // Computed from the local zone rather than handed to git's approxidate
+        // parser, because a calendar boundary is not something approxidate can
+        // be asked for exactly: `last week` is rolling and `monday` is whichever
+        // Monday git prefers. The instant still reaches `git log` as an absolute
+        // epoch, and the header still prints it, so it is checkable either way.
+        let start = match period {
+            Period::Week => clock::week_start(now),
+            Period::Month => clock::month_start(now),
+        };
+        (WindowSource::Rollup { period }, Some(start))
+    } else if config.since_last {
         match read_marker() {
             MarkerState::At(previous) => {
                 // A marker ahead of the clock means the clock moved backwards or

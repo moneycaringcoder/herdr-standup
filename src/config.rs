@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::model::Period;
 use crate::Result;
 
 pub const PLUGIN_ID: &str = "moneycaringcoder.standup";
@@ -212,6 +213,10 @@ pub struct Config {
     /// wholesale rather than adding to it, so a reader can both extend the
     /// defaults and get rid of them.
     pub ignore: Vec<String>,
+    /// Aggregate a calendar week or month instead of listing a day. Sets the
+    /// window from the local clock and suppresses the per-commit lines, because
+    /// a month listed commit by commit is not a digest.
+    pub rollup: Option<Period>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +258,7 @@ impl Default for Config {
                 .iter()
                 .map(|pattern| pattern.to_string())
                 .collect(),
+            rollup: None,
         }
     }
 }
@@ -294,11 +300,41 @@ pub fn load_with_args(args: &[String]) -> Result<Config> {
     if args.iter().any(|a| a == "--no-siblings") {
         config.include_siblings = false;
     }
+    if args.iter().any(|a| a == "--weekly") {
+        config.rollup = Some(Period::Week);
+    }
+    if args.iter().any(|a| a == "--monthly") {
+        config.rollup = Some(Period::Month);
+    }
 
     // `--since` and `--since-last` answer the same question differently, and
     // silently preferring one would make the other look broken.
     if config.since_last && value_arg(args, "--since")?.is_some() {
         return Err("--since and --since-last are mutually exclusive".into());
+    }
+    // A rollup sets its own window from the calendar, so a window the user also
+    // asked for cannot be honoured. Refused by name rather than one quietly
+    // winning, for the same reason as the pair above.
+    if let Some(period) = config.rollup {
+        if args.iter().any(|a| a == "--weekly") && args.iter().any(|a| a == "--monthly") {
+            return Err("--weekly and --monthly are mutually exclusive".into());
+        }
+        for conflicting in ["--since", "--until"] {
+            if value_arg(args, conflicting)?.is_some() {
+                return Err(format!(
+                    "{} and {conflicting} are mutually exclusive: a rollup covers a calendar \
+                     {}, which is the whole point of asking for one",
+                    period.flag(),
+                    period.noun()
+                )
+                .into());
+            }
+        }
+        if config.since_last {
+            return Err(
+                format!("{} and --since-last are mutually exclusive", period.flag()).into(),
+            );
+        }
     }
     Ok(config)
 }
@@ -562,6 +598,47 @@ mod tests {
         ] {
             assert!(!ignored.matches(path), "{path} is somebody's work");
         }
+    }
+
+    /// A rollup sets its own window, so a window the user also asked for cannot
+    /// be honoured. Refused by name rather than one quietly winning: silently
+    /// preferring either would make the other look broken.
+    #[test]
+    fn a_rollup_refuses_to_share_the_window_with_anything() {
+        for conflicting in [
+            vec!["--weekly", "--since", "yesterday"],
+            vec!["--weekly", "--until", "now"],
+            vec!["--weekly", "--since-last"],
+            vec!["--monthly", "--since=2026-08-01"],
+            vec!["--monthly", "--since-last"],
+        ] {
+            let err = load_with_args(&args(&conflicting))
+                .expect_err(&format!("{conflicting:?} should not be accepted"));
+            assert!(
+                err.to_string().contains("mutually exclusive"),
+                "{conflicting:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_rollups_are_mutually_exclusive() {
+        let err = load_with_args(&args(&["--weekly", "--monthly"]))
+            .expect_err("two periods is not a window");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn each_rollup_flag_selects_its_own_period() {
+        assert_eq!(
+            load_with_args(&args(&["--weekly"])).unwrap().rollup,
+            Some(Period::Week)
+        );
+        assert_eq!(
+            load_with_args(&args(&["--monthly"])).unwrap().rollup,
+            Some(Period::Month)
+        );
+        assert_eq!(load_with_args(&args(&[])).unwrap().rollup, None);
     }
 
     #[test]

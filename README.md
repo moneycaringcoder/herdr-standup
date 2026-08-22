@@ -185,6 +185,44 @@ $ git rev-parse --since=bogusgarbage
 git's date parser answers *now* for anything it cannot understand, with a successful exit status. A
 digest built on that is empty, correctly formatted, and a lie. `standup` detects it and refuses.
 
+## Weekly and monthly rollups
+
+```sh
+standup --weekly     # this ISO week, Monday to now
+standup --monthly    # this calendar month, the 1st to now
+```
+
+The window options answer "what happened today". These answer "what happened this month", and the
+difference is not only the window: a rollup **aggregates rather than lists**. The commit lines are
+gone, the totals stay, and each repository gains the number a long window needs —
+
+```
+standup — since 2026-08-01 00:00 UTC +0000 (generated 2026-08-22 11:56)
+  window from --monthly: this calendar month, the 1st to now
+
+  58 commits  ·  115 files (2 generated)  +45159 −1318  across 3 repositories
+
+  herdr-redact                37 commits  ·  64 files (1 generated)  +26584 −907
+    over 4 active days
+```
+
+"37 commits" is a very different month depending on whether it was four days or one, which is why
+active days is there and why a daily digest does not print it.
+
+Both boundaries are **calendar**, not rolling: "the last thirty days" is a different question from
+"this month", and the second is the one people forward. The week starts on **Monday**, which is ISO
+8601's answer rather than the locale's, so the same command means the same window on two machines.
+Both are computed from the local zone and printed as an absolute instant on the line above, so the
+boundary can be checked rather than trusted — and every number is still one git command away:
+
+```sh
+# the active-day count for a repository, by hand
+git log --since-as-filter=@1785542400 --date=format-local:%F --format=%cd --all | sort -u | wc -l
+```
+
+A rollup sets its own window, so `--since`, `--until` and `--since-last` are refused alongside it by
+name rather than one of them quietly winning.
+
 ## How it works
 
 <img src="docs/img/pipeline.svg" alt="herdr's session snapshot and your checkouts feed a pipeline: candidate directories, identify, sibling worktrees, window resolution, per-checkout collection, grouping by repository, then the three renderers." width="100%">
@@ -272,6 +310,8 @@ standup --offline --path ~/repos/app --path ~/repos/api
 --since <WHEN>        Anything git accepts (default: midnight, local)
 --until <WHEN>        End of the window (default: now)
 --since-last          Start from the last digest you read
+--weekly              This ISO week, Monday to now, aggregated
+--monthly             This calendar month, the 1st to now, aggregated
 
 --path <DIR>          Also report this checkout, whether or not herdr knows it
 --offline             Report only --path directories; never touch the socket

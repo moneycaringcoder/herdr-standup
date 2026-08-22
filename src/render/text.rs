@@ -58,9 +58,10 @@ pub fn text(digest: &Digest, config: &Config) -> String {
             ),
         );
         let with_date = dates_needed(digest);
+        let list_commits = lists_commits(&digest.window);
         for repo in &busy {
             blank(&mut out);
-            repo_block(&mut out, repo, config, with_date);
+            repo_block(&mut out, repo, config, with_date, list_commits);
         }
     }
 
@@ -98,7 +99,13 @@ fn header(out: &mut String, digest: &Digest) {
 
 /// One repository: a header line with the numbers right-aligned, then its
 /// checkouts.
-fn repo_block(out: &mut String, repo: &RepoDigest, config: &Config, with_date: bool) {
+fn repo_block(
+    out: &mut String,
+    repo: &RepoDigest,
+    config: &Config,
+    with_date: bool,
+    list_commits: bool,
+) {
     let stats = repo_stats(repo.commits, repo.churn);
     let stats_width = display_width(&stats);
     let name_budget = WIDTH.saturating_sub(stats_width + 4).max(8);
@@ -108,9 +115,21 @@ fn repo_block(out: &mut String, repo: &RepoDigest, config: &Config, with_date: b
         .max(2);
     line(out, &format!("  {name}{}{stats}", " ".repeat(gap)));
 
+    // Only worth saying over a window longer than a day, where "34 commits" is a
+    // very different month depending on whether it was nine days or one.
+    if !list_commits && repo.active_days > 0 {
+        line(
+            out,
+            &format!(
+                "    over {}",
+                quantity(repo.active_days, "active day", "active days")
+            ),
+        );
+    }
+
     let branch_width = branch_column(repo);
     for checkout in sorted_checkouts(repo) {
-        checkout_block(out, checkout, branch_width, config, with_date);
+        checkout_block(out, checkout, branch_width, config, with_date, list_commits);
     }
 }
 
@@ -122,6 +141,7 @@ fn checkout_block(
     branch_width: usize,
     config: &Config,
     with_date: bool,
+    list_commits: bool,
 ) {
     let report = &checkout.report;
 
@@ -171,7 +191,11 @@ fn checkout_block(
         wrapped(out, "      ", "        ", &dirty);
     }
 
-    commit_lines(out, report, config, with_date);
+    // A rollup aggregates rather than lists. A month of commits printed one per
+    // line is a `git log` with extra steps, and not the thing anybody forwards.
+    if list_commits {
+        commit_lines(out, report, config, with_date);
+    }
 }
 
 fn commit_lines(out: &mut String, report: &CheckoutReport, config: &Config, with_date: bool) {

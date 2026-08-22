@@ -9,12 +9,6 @@ A feature that cannot meet that does not belong here.
 
 ## More ways to read it
 
-### Weekly and monthly rollups
-
-The window options answer "what happened today". The same data answers "what
-happened this month" if it is aggregated rather than listed, and that is the
-version a person forwards to someone else.
-
 ### Diff two digests
 
 `--since-last` starts from the last digest a human read. The natural next question

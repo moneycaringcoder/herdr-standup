@@ -16,7 +16,7 @@ use std::time::Duration;
 use standup::clock;
 use standup::config::{self, Config};
 use standup::git::Git;
-use standup::model::{Note, Severity, Stamp, WindowSource};
+use standup::model::{Note, Period, Severity, Stamp, WindowSource};
 use standup::window;
 
 /// `HERDR_PLUGIN_STATE_DIR` is process-global, so these tests run one at a
@@ -598,6 +598,91 @@ fn open_ended(spec: &str) -> Config {
         since: spec.to_string(),
         since_is_explicit: true,
         ..Config::default()
+    }
+}
+
+/// A rollup window comes from the local clock, not from git's approxidate
+/// parser, and lands on a calendar boundary. Asserted as properties rather than
+/// against a fixed epoch, because the answer depends on the zone the test host
+/// is in and on which day it is run — both of which are exactly what the
+/// boundary has to be right about.
+#[test]
+fn a_weekly_rollup_starts_at_the_monday_of_this_week() {
+    let state = StateDir::new();
+    let anchor = Anchor::new();
+    let config = Config {
+        rollup: Some(Period::Week),
+        ..Config::default()
+    };
+
+    let (window, notes) =
+        window::resolve(&git(), &anchor.anchors(), &date_ref_repo(&state), &config)
+            .expect("a rollup window needs no parsing and cannot fail on a spec");
+
+    assert_eq!(
+        window.source,
+        WindowSource::Rollup {
+            period: Period::Week
+        }
+    );
+    assert_eq!(
+        window.since.epoch,
+        clock::week_start(clock::now()),
+        "the window must be this week's Monday, not something git guessed"
+    );
+    assert!(window.until.is_none(), "a rollup runs up to now");
+    assert!(notes.is_empty(), "nothing to explain: {notes:?}");
+}
+
+#[test]
+fn a_monthly_rollup_starts_at_the_first_of_this_month() {
+    let state = StateDir::new();
+    let anchor = Anchor::new();
+    let config = Config {
+        rollup: Some(Period::Month),
+        ..Config::default()
+    };
+
+    let (window, notes) =
+        window::resolve(&git(), &anchor.anchors(), &date_ref_repo(&state), &config)
+            .expect("a rollup window needs no parsing and cannot fail on a spec");
+
+    assert_eq!(
+        window.source,
+        WindowSource::Rollup {
+            period: Period::Month
+        }
+    );
+    assert_eq!(window.since.epoch, clock::month_start(clock::now()));
+    assert!(notes.is_empty(), "{notes:?}");
+}
+
+/// A rollup is a window in its own right, so it must not be mistaken for the
+/// "empty by construction" case that `--since now` is warned about. The month
+/// boundary is days in the past; nothing to warn about.
+#[test]
+fn a_rollup_is_never_flagged_as_starting_now() {
+    let state = StateDir::new();
+    let anchor = Anchor::new();
+
+    for period in [Period::Week, Period::Month] {
+        let config = Config {
+            rollup: Some(period),
+            ..Config::default()
+        };
+        let (window, notes) =
+            window::resolve(&git(), &anchor.anchors(), &date_ref_repo(&state), &config)
+                .expect("resolved");
+        assert!(
+            window.since.epoch <= clock::now(),
+            "{:?} started in the future",
+            period
+        );
+        assert!(
+            notes.iter().all(|note| note.severity != Severity::Warning),
+            "{:?} produced a warning: {notes:?}",
+            period
+        );
     }
 }
 

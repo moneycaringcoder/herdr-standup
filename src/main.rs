@@ -24,6 +24,9 @@ Window:
   --until <WHEN>      End of the window (default: now)
   --since-last        Start from the last digest you read. Falls back to the
                       default window, loudly, the first time.
+  --weekly            This ISO week, Monday to now, aggregated rather than
+                      listed. Sets its own window.
+  --monthly           This calendar month, the 1st to now, likewise.
 
 Selection:
   --path <DIR>        Also report this checkout, whether or not herdr knows it
@@ -48,8 +51,10 @@ fn main() {
 const VALUED: [&str; 5] = ["--since", "--until", "--path", "--format", "--max-commits"];
 
 /// Options that stand alone.
-const FLAGS: [&str; 6] = [
+const FLAGS: [&str; 8] = [
     "--since-last",
+    "--weekly",
+    "--monthly",
     "--offline",
     "--busy",
     "--all",

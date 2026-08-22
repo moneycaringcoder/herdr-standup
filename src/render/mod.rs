@@ -34,7 +34,7 @@ use std::path::Path;
 use crate::config::{Config, Format};
 use crate::model::{
     Activity, AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Equivalence,
-    Head, Landed, RepoDigest, Stamp, Tracking, Unpushed, Window, WindowSource,
+    Head, Landed, Period, RepoDigest, Stamp, Tracking, Unpushed, Window, WindowSource,
 };
 use crate::Result;
 
@@ -522,7 +522,25 @@ pub(crate) fn window_note(window: &Window) -> Option<String> {
              showing today instead"
                 .to_string(),
         ),
+        // Names the boundary convention rather than only the flag. A reader who
+        // disagrees about when a week starts needs to know which Monday this is,
+        // and the resolved instant is printed on the line above.
+        WindowSource::Rollup {
+            period: Period::Week,
+        } => Some("window from --weekly: this ISO week, Monday to now".to_string()),
+        WindowSource::Rollup {
+            period: Period::Month,
+        } => Some("window from --monthly: this calendar month, the 1st to now".to_string()),
     }
+}
+
+/// Whether the digest lists individual commits.
+///
+/// A rollup does not. "The same data answers what happened this month if it is
+/// aggregated rather than listed" is the whole request, and a month listed
+/// commit by commit is not a digest — it is a `git log` with extra steps.
+pub(crate) fn lists_commits(window: &Window) -> bool {
+    !matches!(window.source, WindowSource::Rollup { .. })
 }
 
 // ---------------------------------------------------------------------------
