@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::cache::Cache;
 use crate::clock;
 use crate::config::{Config, Ignored};
 use crate::git::{CheckoutId, Git};
@@ -39,7 +40,12 @@ use crate::Result;
 /// returned as an error.
 pub fn build(config: &Config) -> Result<Digest> {
     let ignored = Ignored::new(config.ignore.clone());
-    let git = Git::new(config.git_timeout).ignoring(ignored.clone());
+    // The persistent cache is asked for here and nowhere else. `Git::new` alone
+    // caches in memory only, which is what keeps the test suites from reading
+    // the state directory of whoever is running them.
+    let git = Git::new(config.git_timeout)
+        .ignoring(ignored.clone())
+        .caching(Cache::load());
     let mut notes: Vec<Note> = Vec::new();
 
     let workspaces = collect_workspaces(config, &mut notes)?;
@@ -157,6 +163,10 @@ pub fn build(config: &Config) -> Result<Digest> {
     if !config.include_quiet {
         repos.retain(|repo| repo.activity() != Activity::Quiet);
     }
+
+    // Written once, after every checkout has been collected, so a session of
+    // twenty worktrees costs one file replacement rather than twenty.
+    git.save_cache();
 
     Ok(Digest {
         schema: SCHEMA_VERSION,

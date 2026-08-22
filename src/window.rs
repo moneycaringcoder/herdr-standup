@@ -7,14 +7,13 @@
 //! the header state exactly which instant the window starts at instead of
 //! echoing the user's fuzzy phrase back at them.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::clock;
 use crate::config::{self, Config};
 use crate::git::Git;
 use crate::model::{Note, Period, Stamp, Window, WindowSource};
+use crate::state_file;
 use crate::Result;
 
 /// How close to the current instant a resolved window start has to be before it
@@ -291,52 +290,11 @@ fn read_marker() -> MarkerState {
 /// Written **after** a successful render, so a run that blew up does not
 /// advance the marker past work it never showed anybody.
 pub fn record_run(at: &Stamp) -> Result<()> {
-    let path = config::last_run_file();
-    let dir = path
-        .parent()
-        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
-    std::fs::create_dir_all(dir).map_err(|err| {
-        format!(
-            "could not create the state directory {}: {err}",
-            dir.display()
-        )
-    })?;
-
     let mut body = serde_json::to_string_pretty(at)
         .map_err(|err| format!("could not encode the last-run marker: {err}"))?;
     body.push('\n');
-
-    // Written to a temporary file beside the target and renamed over it. An
-    // interrupted run must not leave half a marker behind, because the next
-    // `--since-last` would refuse to parse it and silently fall back to the
-    // default window.
-    let temp = dir.join(format!(
-        ".last-run.{}.{}.tmp",
-        std::process::id(),
-        next_temp_id()
-    ));
-    if let Err(err) = write_all(&temp, body.as_bytes()) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(format!("could not write {}: {err}", temp.display()).into());
-    }
-    if let Err(err) = std::fs::rename(&temp, &path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(format!("could not replace {}: {err}", path.display()).into());
-    }
-    Ok(())
-}
-
-fn write_all(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = std::fs::File::create(path)?;
-    file.write_all(bytes)?;
-    // The rename is only atomic with respect to a crash if the bytes are on
-    // disk before it happens.
-    file.sync_all()
-}
-
-/// Distinguishes the temporary files of two runs in one process, so a digest
-/// that records twice cannot have one write clobber the other's temporary.
-fn next_temp_id() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    NEXT.fetch_add(1, Ordering::Relaxed)
+    // Replaced atomically: an interrupted run must not leave half a marker
+    // behind, because the next `--since-last` would refuse to parse it and
+    // silently fall back to the default window. See `state_file`.
+    state_file::replace(&config::last_run_file(), "last-run", body.as_bytes())
 }

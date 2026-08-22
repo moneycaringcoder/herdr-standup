@@ -8,6 +8,31 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- The landing probes are cached, keyed on the shas that determine them. On a
+  purpose-built repository — 800 trunk commits, twelve worktrees, 16.5 MB of
+  patch text — a run went from 3.64 s to 1.49 s cold and 0.39 s warm, with a
+  byte-identical digest each time.
+
+  Two keys. The verdict is keyed on the head sha, the trunk's name and the
+  trunk's sha; the expensive part — the patch ids of the trunk range, which is
+  where `git log -p` spends 175 KiB per commit — is keyed on the fork point and
+  the trunk sha, which is the same key for every worktree branched from one
+  commit of a trunk that has not moved. That is why even the first run is faster:
+  twelve worktrees share one walk instead of repeating it.
+
+  There is no expiry and nothing to invalidate. Both probes are pure functions of
+  shas given the pinned diff options, so anything that could change an answer
+  moves a sha, and a moved sha is a different key: a checkout that moved cannot
+  be served a stale verdict. A failed probe is never stored, because git failing
+  once must not become permanent, and the file carries a version that is bumped
+  whenever the probes change, so an answer produced by code that no longer exists
+  is discarded rather than trusted.
+
+  The cache is invisible: a hit and a miss produce the same report, which is
+  asserted rather than assumed. The tests prove hits by seeding an answer git
+  cannot produce for that repository and requiring the report to carry it, and
+  prove misses the same way round.
+
 - `--fail-if-empty`, which exits **2** when there is nothing to report, so a
   cron line can decline to post rather than sending an empty message. The digest
   still prints; the status is for the caller.

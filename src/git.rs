@@ -94,6 +94,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::cache::Cache;
 use crate::clock;
 use crate::config::{Ignored, DEFAULT_BRANCH_CANDIDATES};
 use crate::model::{
@@ -182,14 +183,29 @@ pub struct CheckoutId {
     pub is_linked_worktree: bool,
 }
 
+/// The repository's default branch: the name a digest reports and the commit it
+/// currently points at.
+///
+/// The two travel together because the answer needs the name and the cache key
+/// needs the sha — a trunk that moved must not be served yesterday's verdict,
+/// and the sha is the only thing that says it moved.
+struct Trunk {
+    name: String,
+    oid: String,
+}
+
 /// A git runner. Holds the resolved binary, the per-invocation timeout — so one
-/// wedged repository cannot stall the whole digest — and the paths whose lines
-/// are not counted.
-#[derive(Debug, Clone)]
+/// wedged repository cannot stall the whole digest — the paths whose lines are
+/// not counted, and the cache for the landing probes.
+///
+/// The cache is in-memory unless a caller asks for the persistent one, which
+/// keeps every test hermetic: a suite that read the developer's real state
+/// directory would pass or fail depending on what they ran yesterday.
 pub struct Git {
     program: PathBuf,
     timeout: Duration,
     ignored: Ignored,
+    cache: Cache,
 }
 
 /// One finished invocation. `code` is `None` when the child was killed by a
@@ -238,7 +254,21 @@ impl Git {
             program: resolve_program(),
             timeout,
             ignored: Ignored::default(),
+            cache: Cache::in_memory(),
         }
+    }
+
+    /// Replaces the in-memory cache with a persistent one. `standup.rs` passes
+    /// the real one; tests pass a cache in a temp directory or none at all.
+    pub fn caching(mut self, cache: Cache) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    /// Writes the cache back. Best-effort and silent, and called once the digest
+    /// is collected rather than per checkout, so twenty worktrees cost one write.
+    pub fn save_cache(&self) {
+        self.cache.save();
     }
 
     /// Replaces the paths whose lines are not counted. The default is
@@ -923,13 +953,14 @@ impl Git {
     /// not find a default branch" and "this did not land" are opposite messages
     /// to the person reading the digest.
     fn landed(&self, path: &Path, head: &Head, problems: &mut Vec<String>) -> Landed {
-        let Some(default) = self.default_branch(path, problems) else {
+        let Some(trunk) = self.default_branch(path, problems) else {
             return Landed::Unknown {
                 reason: "no default branch found: no refs/remotes/origin/HEAD, and none of the \
                          usual names resolve"
                     .to_string(),
             };
         };
+        let default = trunk.name.as_str();
 
         if let Some(branch) = head.branch_name() {
             // `origin/main` and the local `main` are the same trunk for this
@@ -940,7 +971,9 @@ impl Git {
                     .map(|short| short == branch)
                     .unwrap_or(false);
             if same {
-                return Landed::IsDefault { name: default };
+                return Landed::IsDefault {
+                    name: default.to_string(),
+                };
             }
         }
 
@@ -950,6 +983,32 @@ impl Git {
             };
         };
 
+        // Everything below is a pure function of these three, so this is where
+        // the cache sits: one key, one answer, and a checkout that moved cannot
+        // hit it. The `IsDefault` answer above is deliberately outside it —
+        // it turns on the *branch name*, so a detached HEAD at the trunk's own
+        // commit must not be served the answer computed for the branch.
+        let key = Cache::answer_key(oid, default, &trunk.oid);
+        if let Some(landed) = self.cache.answer(&key) {
+            return landed;
+        }
+        let landed = self.landing(path, oid, trunk, problems);
+        // A failure is not an answer and is never stored: git could not be run
+        // this time, and caching that would make one bad minute permanent.
+        if !matches!(landed, Landed::Unknown { .. }) {
+            self.cache.remember_answer(key, landed.clone());
+        }
+        landed
+    }
+
+    /// The two questions behind [`Landed`], for a checkout that is not the trunk
+    /// and has a commit. Split out so the cache above has exactly one thing to
+    /// wrap, and so the expensive path is one call away from being read.
+    fn landing(&self, path: &Path, oid: &str, trunk: Trunk, problems: &mut Vec<String>) -> Landed {
+        let Trunk {
+            name: default,
+            oid: trunk_oid,
+        } = trunk;
         let Some(out) = self.capture(
             path,
             &["merge-base", "--is-ancestor", oid, default.as_str()],
@@ -964,7 +1023,7 @@ impl Git {
             // Exit 1 is "not contained", which is not the same as "did not
             // land"; see `equivalent_patch`. A probe that could not be run is
             // not an answer either, and must not arrive as one.
-            Some(1) => match self.equivalent_patch(path, oid, &default, problems) {
+            Some(1) => match self.equivalent_patch(path, oid, &default, &trunk_oid, problems) {
                 Ok(Some(how)) => Landed::Equivalent { into: default, how },
                 Ok(None) => Landed::NotMerged { into: default },
                 Err(reason) => Landed::Unknown {
@@ -1013,6 +1072,7 @@ impl Git {
         path: &Path,
         oid: &str,
         default: &str,
+        trunk_oid: &str,
         problems: &mut Vec<String>,
     ) -> std::result::Result<Option<Equivalence>, String> {
         // Both probes are relative to the fork point. Unrelated histories have
@@ -1064,23 +1124,34 @@ impl Git {
             return Ok(None);
         };
         let range = format!("{base}..{default}");
-        Ok(self
-            .patch_ids(
-                path,
-                &diff_args(&[
-                    "log",
-                    // A merge commit prints a header and no diff, which would
-                    // hand the next commit's patch to the wrong sha.
-                    "--no-merges",
-                    // `patch-id` reads the sha off the `commit <sha>` line that
-                    // git's default format happens to print, so a host
-                    // `format.pretty` would otherwise take it away and leave
-                    // every id attributed to nothing.
-                    "--format=commit %H",
-                    &range,
-                ]),
-                problems,
-            )?
+        // The expensive one, and the reason this cache exists: `log -p` over the
+        // trunk range is the whole cost of the probe, and its key holds for every
+        // worktree branched from the same commit of a trunk that has not moved.
+        let range_key = Cache::range_key(&base, trunk_oid);
+        let trunk_ids = match self.cache.range(&range_key) {
+            Some(ids) => ids,
+            None => {
+                let ids = self.patch_ids(
+                    path,
+                    &diff_args(&[
+                        "log",
+                        // A merge commit prints a header and no diff, which would
+                        // hand the next commit's patch to the wrong sha.
+                        "--no-merges",
+                        // `patch-id` reads the sha off the `commit <sha>` line
+                        // that git's default format happens to print, so a host
+                        // `format.pretty` would otherwise take it away and leave
+                        // every id attributed to nothing.
+                        "--format=commit %H",
+                        &range,
+                    ]),
+                    problems,
+                )?;
+                self.cache.remember_range(range_key, ids.clone());
+                ids
+            }
+        };
+        Ok(trunk_ids
             .into_iter()
             .find(|(id, _)| *id == wanted)
             .map(|(_, oid)| Equivalence::Squashed { oid }))
@@ -1170,7 +1241,7 @@ impl Git {
     }
 
     /// The repository's default branch, as a resolvable ref name.
-    fn default_branch(&self, path: &Path, problems: &mut Vec<String>) -> Option<String> {
+    fn default_branch(&self, path: &Path, problems: &mut Vec<String>) -> Option<Trunk> {
         let pointed = self
             .capture(
                 path,
@@ -1181,19 +1252,27 @@ impl Git {
             .map(|out| out.stdout_text())
             .filter(|name| !name.is_empty());
         if let Some(name) = pointed {
-            if self.resolves(path, &name, problems) {
-                return Some(name);
+            if let Some(oid) = self.resolves(path, &name, problems) {
+                return Some(Trunk { name, oid });
             }
         }
         for candidate in DEFAULT_BRANCH_CANDIDATES.iter().copied() {
-            if self.resolves(path, candidate, problems) {
-                return Some(candidate.to_string());
+            if let Some(oid) = self.resolves(path, candidate, problems) {
+                return Some(Trunk {
+                    name: candidate.to_string(),
+                    oid,
+                });
             }
         }
         None
     }
 
-    fn resolves(&self, path: &Path, reference: &str, problems: &mut Vec<String>) -> bool {
+    /// The commit a ref names, or `None` when it does not resolve.
+    ///
+    /// The sha is the point: it is what makes the trunk's position part of the
+    /// cache key, and `rev-parse --verify` was already being run for the yes/no
+    /// answer, so nothing extra is spawned to learn it.
+    fn resolves(&self, path: &Path, reference: &str, problems: &mut Vec<String>) -> Option<String> {
         self.capture(
             path,
             &[
@@ -1204,8 +1283,9 @@ impl Git {
             ],
             problems,
         )
-        .map(|out| out.ok())
-        .unwrap_or(false)
+        .filter(GitOut::ok)
+        .map(|out| out.stdout_text())
+        .filter(|oid| !oid.is_empty())
     }
 
     // -----------------------------------------------------------------------

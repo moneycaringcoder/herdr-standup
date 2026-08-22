@@ -377,8 +377,8 @@ cost or about a repository shape rather than about the answer:
 - Buffering the diff is an allocation with no bound on it. `log -p` over a trunk
   range is the largest thing this module asks git for — roughly 175 KiB of patch
   text per commit, so an 800-commit range is 140 MB — and a stale branch on a
-  busy trunk pays that per checkout. The natural fix is the caching in the
-  roadmap's "Cache plumbing results" entry rather than a second pipe here.
+  busy trunk pays that per checkout. That cost is now paid at most once per
+  (fork point, trunk tip); see below.
 - In a `--filter=blob:none` or treeless **partial clone** the blobs a diff needs
   are absent, and git's answer is to fetch them from the promisor remote and
   write them into `.git/objects` — measured on git 2.53.0, a blobless clone went
@@ -386,6 +386,47 @@ cost or about a repository shape rather than about the answer:
   write and a network call from a plugin that promises neither. It is not new
   with these probes: `log --numstat` has always needed the same blobs. It has
   its own issue.
+
+### Cached by sha
+
+Everything below the `IsDefault` check is a pure function of shas, given the
+pinned diff options: `cherry`, the combined diff, and the trunk range depend on
+nothing but the commits in the range. So the answers are cached, in
+`src/cache.rs`, under two keys:
+
+| key | value | shared by |
+|---|---|---|
+| head sha + trunk **name** + trunk sha | the whole `Landed` verdict | repeated runs of an unchanged checkout |
+| fork point sha + trunk sha | the trunk range's patch ids | every worktree branched from one commit of a trunk that has not moved |
+
+The trunk's *name* is in the first key as well as its sha, because the verdict
+carries it: a repository that gained an `origin/HEAD` pointing elsewhere has a
+different answer to report even when both names resolve to one commit. The
+`IsDefault` answer is deliberately outside the cache — it turns on the branch
+*name*, so a detached HEAD sitting on the trunk's own commit must not be served
+the answer computed for the branch.
+
+There is no expiry and nothing to invalidate: anything that could change an
+answer moves a sha and so misses. Two things are never stored — a verdict of
+`Unknown`, because git failing once must not become permanent, and a range
+longer than 20,000 commits, because a convenience should not become a liability.
+
+`cache::VERSION` is the part that matters. A stored value is the *output* of the
+probes and carries no record of how it was produced, so any change to what a
+probe would answer for the same shas has to bump it, and the file is then
+discarded rather than trusted.
+
+Measured on a purpose-built repository — 800 trunk commits, a 700-commit range,
+16.5 MB of patch text, twelve worktrees branched from one fork point:
+
+| run | wall time |
+|---|---|
+| before the cache | 3.64 s |
+| cold cache | 1.49 s |
+| warm cache | 0.39 s |
+
+The cold run already gains because the twelve worktrees share one trunk range
+rather than walking it twelve times. The digest is byte-identical in all three.
 
 ### Three answers, not two
 
@@ -406,7 +447,10 @@ same discipline the missing-default-branch case already had.
 The cost is the range `git cherry` already walks; it builds a patch-id map of
 the upstream side to do its own job, so the second probe is the same order of
 work rather than a new one. Both are bounded by the module's per-invocation
-deadline, which records a problem rather than guessing.
+deadline, which records a problem rather than guessing — and neither is a
+backstop for the cost: a deadline turns a slow answer into `not merged` plus a
+problem note, which on a large repository would make the loud state the normal
+one. That is what the cache above is for.
 
 ## Degenerate states
 

@@ -5,6 +5,7 @@
 //! behind `#[path]` includes, which break as soon as a module says `crate::`.
 
 pub mod by_agent;
+pub mod cache;
 pub mod clock;
 pub mod compare;
 pub mod config;
@@ -13,6 +14,7 @@ pub mod herdr;
 pub mod model;
 pub mod render;
 pub mod standup;
+pub mod state_file;
 pub mod window;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

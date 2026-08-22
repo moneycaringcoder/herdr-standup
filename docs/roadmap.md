@@ -7,14 +7,6 @@ The standard everything below is held to is the one in the README: **every numbe
 is one git command away from being checked by hand, and none of them is a guess.**
 A feature that cannot meet that does not belong here.
 
-## Operating it
-
-### Cache plumbing results
-
-Large repositories re-walk the same history on every run. Caching by head sha
-would make a repeated digest cheap without ever serving a stale answer for a
-checkout that moved.
-
 ## Interfaces
 
 ### An explicit timezone in the JSON
