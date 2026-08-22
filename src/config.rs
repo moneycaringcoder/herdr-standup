@@ -223,6 +223,11 @@ pub struct Config {
 pub enum Format {
     Text,
     Markdown,
+    /// Slack's mrkdwn, which is not Markdown: single-asterisk bold, no list
+    /// syntax, and `&`/`<`/`>` as HTML entities.
+    Slack,
+    /// A complete HTML document with every style inline, for an email.
+    Html,
     Json,
 }
 
@@ -231,10 +236,13 @@ impl Format {
         match raw.trim().to_ascii_lowercase().as_str() {
             "text" | "plain" => Ok(Format::Text),
             "markdown" | "md" => Ok(Format::Markdown),
+            "slack" | "mrkdwn" => Ok(Format::Slack),
+            "html" => Ok(Format::Html),
             "json" => Ok(Format::Json),
-            other => {
-                Err(format!("unknown --format `{other}`; expected text, markdown or json").into())
-            }
+            other => Err(format!(
+                "unknown --format `{other}`; expected text, markdown, slack, html or json"
+            )
+            .into()),
         }
     }
 }

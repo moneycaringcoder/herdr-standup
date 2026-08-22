@@ -23,10 +23,14 @@
 //! so the terminal report and the pasted Markdown can never drift into saying
 //! different things about the same checkout.
 
+mod html;
 mod markdown;
+mod slack;
 mod text;
 
+pub use html::html;
 pub use markdown::markdown;
+pub use slack::slack;
 pub use text::text;
 
 use std::path::Path;
@@ -68,10 +72,11 @@ pub fn render(digest: &Digest, config: &Config) -> Result<String> {
     match config.format {
         Format::Text => Ok(text(digest, config)),
         Format::Markdown => Ok(markdown(digest, config)),
+        Format::Slack => Ok(slack(digest, config)),
+        Format::Html => Ok(html(digest, config)),
         Format::Json => json(digest),
     }
 }
-
 /// Machine-readable digest. Stable shape, versioned by
 /// [`SCHEMA_VERSION`](crate::model::SCHEMA_VERSION).
 pub fn json(digest: &Digest) -> Result<String> {
@@ -87,6 +92,8 @@ pub fn render_comparison(comparison: &Comparison, config: &Config) -> Result<Str
     match config.format {
         Format::Text => Ok(text::comparison(comparison)),
         Format::Markdown => Ok(markdown::comparison(comparison)),
+        Format::Slack => Ok(slack::comparison(comparison)),
+        Format::Html => Ok(html::comparison(comparison)),
         Format::Json => Ok(serde_json::to_string_pretty(comparison)?),
     }
 }

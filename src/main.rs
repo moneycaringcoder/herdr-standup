@@ -12,6 +12,8 @@ Usage: standup [VERB] [OPTIONS]
 Verbs:
   --report            Human-readable digest (default)
   --markdown          The same digest as Markdown, ready to paste
+  --slack             The same digest as Slack mrkdwn, which is not Markdown
+  --html              The same digest as an email-ready HTML document
   --json              The same digest as JSON, for scripting
   --version           Print version and exit
   --help              Show this help
@@ -73,9 +75,11 @@ const FLAGS: [&str; 8] = [
 ];
 
 /// Every verb, so an argument that is none of the above can be rejected.
-const VERBS: [&str; 6] = [
+const VERBS: [&str; 8] = [
     "--report",
     "--markdown",
+    "--slack",
+    "--html",
     "--json",
     "--version",
     "--help",
@@ -150,7 +154,7 @@ fn run(args: &[String]) -> Result<()> {
         check_arguments(args)?;
     }
     match verb {
-        "--report" | "--markdown" | "--json" => {
+        "--report" | "--markdown" | "--slack" | "--html" | "--json" => {
             let mut config = config::load_with_args(args)?;
             // The verb picks the format unless `--format` said otherwise; both
             // spellings exist because the manifest wants one action per format
@@ -158,6 +162,8 @@ fn run(args: &[String]) -> Result<()> {
             if config::value_arg(args, "--format")?.is_none() {
                 config.format = match verb {
                     "--markdown" => config::Format::Markdown,
+                    "--slack" => config::Format::Slack,
+                    "--html" => config::Format::Html,
                     "--json" => config::Format::Json,
                     _ => config.format,
                 };
