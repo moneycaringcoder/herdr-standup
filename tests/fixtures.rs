@@ -267,6 +267,59 @@ impl Fixture {
         ))
     }
 
+    /// `git <args> | git patch-id --stable`, as `(patch id, commit)` pairs.
+    ///
+    /// Only `git_contract.rs` needs this: it asserts that git itself agrees
+    /// between the plumbing and porcelain diff forms, which is a claim about git
+    /// rather than about the collector.
+    pub fn patch_id(&self, cwd: &Path, args: &[&str]) -> Vec<(String, String)> {
+        let diff = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .env("HOME", self.root.join("home"))
+            .env("GIT_CONFIG_GLOBAL", self.root.join("home/.gitconfig"))
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .output()
+            .expect("spawn git");
+        assert!(
+            diff.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&diff.stderr)
+        );
+
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["patch-id", "--stable"])
+            .env("GIT_CONFIG_GLOBAL", self.root.join("home/.gitconfig"))
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("LC_ALL", "C")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn git patch-id");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(&diff.stdout)
+            .expect("feed patch-id");
+        let out = child.wait_with_output().expect("wait for patch-id");
+        assert!(out.status.success(), "git patch-id failed");
+
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                Some((fields.next()?.to_string(), fields.next()?.to_string()))
+            })
+            .collect()
+    }
+
     // -----------------------------------------------------------------------
     // Worktree shapes
     // -----------------------------------------------------------------------

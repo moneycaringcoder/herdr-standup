@@ -7,16 +7,6 @@ The standard everything below is held to is the one in the README: **every numbe
 is one git command away from being checked by hand, and none of them is a guess.**
 A feature that cannot meet that does not belong here.
 
-## Windows and coverage
-
-### Cover the paths the first cross-platform run exposed
-
-The first CI run on macOS found three failures, none of them faults in the plugin,
-and one of them a real upstream change: git 2.55 redefined `--since today` from
-the current instant to local midnight. That class of thing is only found by
-running somewhere new. Broadening the matrix is how the next one gets found before
-a user does.
-
 ## More ways to read it
 
 ### Weekly and monthly rollups

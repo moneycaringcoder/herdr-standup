@@ -8,6 +8,23 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- A broader CI matrix, and a red row that says which kind of thing broke. Five
+  rows now: Linux and macOS, arm64 and x86_64, and four different builds of git
+  including one deliberately newer than any distro ships — git 2.55 redefined
+  `--since today` from the current instant to local midnight, and the only way
+  to meet that class of change before a user does is to run a git nobody has
+  tried yet. `tests/git_contract.rs` is a new test target that asserts what
+  **git** does, with no plugin code in the way: the `diff` index writeback that
+  `--no-optional-locks` does not cover, `--max-age` pruning where
+  `--since-as-filter` does not, `rev-parse --since=<garbage>` exiting 0 and
+  answering now, `patch-id` agreeing between plumbing and porcelain under the
+  pinned diff options, `rev-list --not --remotes`, the binary `--numstat`
+  spelling, and `symbolic-ref` still being unable to tell an unborn branch from
+  a deleted one. It runs first and on its own, so a failure there means the
+  environment moved and a failure after it means the plugin is wrong — a
+  distinction that cost more than fixing either the first time round. Each row
+  also prints its git version and what that git makes of `today`, `midnight` and
+  garbage, before anything can fail.
 - **Generated and vendored paths no longer distort the line counts.** Lines added
   and removed are a proxy for effort, and one regenerated lockfile destroys it:
   a `pnpm-lock.yaml` churns tens of thousands of lines nobody wrote. Paths

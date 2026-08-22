@@ -9,18 +9,68 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  # Platform-independent, so it runs once rather than on every matrix row.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.git }} git)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every row runs. The point of a matrix this shape is seeing *which*
+      # environment disagrees, and a cancelled row tells you nothing.
+      fail-fast: false
+      matrix:
+        # Two OS families, two architectures, and four different builds of git.
+        # `*-latest` rows track whatever GitHub currently ships, so the matrix
+        # keeps covering the newest image without being edited; the pinned rows
+        # are the axes worth holding still.
+        #
+        # The `newest` row is the one that earns its place. git 2.55 redefined
+        # `--since today` from the current instant to local midnight, and the
+        # only reason to run a git newer than any distro ships is to meet that
+        # class of change before a user does.
+        include:
+          - os: ubuntu-latest
+            git: distro
+          - os: ubuntu-latest
+            git: newest
+          # arm64 and APFS, which enforces UTF-8 filenames where ext4 does not —
+          # the reason `Fixture::awkward_paths_commit` has a fallback at all.
+          - os: macos-latest
+            git: distro
+          # x86_64 macOS, available until August 2027.
+          - os: macos-15-intel
+            git: distro
+          # The newest macOS image, and whatever Apple ships as git on it.
+          - os: macos-26
+            git: distro
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the newest git
+        if: matrix.git == 'newest'
+        run: |
+          sudo add-apt-repository -y ppa:git-core/ppa
+          sudo apt-get update -qq
+          sudo apt-get install -y git
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
 
       - uses: Swatinem/rust-cache@v2
 
@@ -32,16 +82,42 @@ jobs:
           git config --global user.email "ci@example.invalid"
           git config --global user.name "standup ci"
           git config --global init.defaultBranch main
-          git --version
 
-      - name: Format
-        run: cargo fmt --all -- --check
+      # Printed before anything can fail, so a red row carries its own evidence.
+      # Every line here is something the plugin's behaviour depends on, and the
+      # first cross-platform run cost real time precisely because this was not
+      # in the log.
+      - name: Environment
+        run: |
+          echo "runner:   ${{ matrix.os }} ($(uname -sm))"
+          echo "git:      $(git --version)"
+          echo "rustc:    $(rustc --version)"
+          echo "now:      $(date +%s) ($(date))"
+          echo "--since today    -> $(git rev-parse --since=today)"
+          echo "--since midnight -> $(git rev-parse --since=midnight)"
+          # Captured rather than interpolated, because `$?` inside an `echo`
+          # reports the echo. The exit status is the interesting half: git
+          # answers *now* with status 0 for input it cannot parse, and
+          # `resolve_date` exists because of that.
+          garbage=$(git rev-parse --since=bogusgarbage) && status=0 || status=$?
+          echo "--since garbage  -> $garbage (exit $status)"
+          printf -- '--since-as-filter: '
+          if git log --since-as-filter=@0 --format= --max-count=0 >/dev/null 2>&1; then
+            echo "supported"
+          else
+            echo "NOT supported (git is older than 2.37; the collector falls back to --max-age)"
+          fi
 
-      - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+      # First, and on its own, because the answer to "is the plugin wrong or did
+      # the environment change under it" is the expensive thing to work out from
+      # a red build. Everything in this target asserts what *git* does, with no
+      # standup code in the way: if it fails, start with docs/git-plumbing.md.
+      - name: Environment contract
+        run: cargo test --locked --test git_contract
 
+      # And if the contract passed but this fails, the plugin is wrong.
       - name: Test
-        run: cargo test --all --locked
+        run: cargo test --locked --all
 
       - name: Release build
         run: cargo build --release --locked

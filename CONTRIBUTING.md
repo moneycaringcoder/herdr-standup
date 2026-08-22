@@ -68,9 +68,24 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --all
 ```
 
-CI runs exactly these on Linux and macOS with the current stable toolchain. If
+CI runs these on a matrix of five rows: Linux and macOS, arm64 and x86_64, and
+four different builds of git — including one deliberately newer than any distro
+ships, because git 2.55 redefined `--since today` under us and the only way to
+meet that class of change before a user does is to run a git nobody has yet. If
 your local Rust is older than CI's, clippy will pass locally and fail there —
 `rustup update stable` first if in doubt.
+
+**When a matrix row goes red, read which step failed first.** `tests/git_contract.rs`
+runs on its own, before everything else, and asserts what *git* does with no
+standup code in the way. A failure there means the environment changed under the
+plugin, and the place to start is `docs/git-plumbing.md`, which is where the
+claim it broke is written down. A failure in any later step, with the contract
+green, means the plugin is wrong. Working that out from a red build used to cost
+more than fixing either.
+
+Two rules for anything added to `git_contract.rs`: no standup code, and every
+assertion message names what depends on the behaviour, so the failure tells the
+next reader where to look rather than only that a number moved.
 
 No test requires a running herdr. The fixtures build throwaway git repositories
 in a temp directory, and the socket tests replay a captured real snapshot.
