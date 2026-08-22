@@ -222,6 +222,10 @@ pub struct Config {
     /// interleaves unrelated projects for the same reason grouping by time
     /// would. See `by_agent`.
     pub by_agent: bool,
+    /// Exit non-zero when the digest has nothing to report. For cron and CI,
+    /// where an empty message posted to a channel is worse than no message.
+    /// Changes the exit status only, never the output.
+    pub fail_if_empty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +278,7 @@ impl Default for Config {
             rollup: None,
             // Never the default. Repository grouping is the deliberate choice.
             by_agent: false,
+            fail_if_empty: false,
         }
     }
 }
@@ -323,6 +328,9 @@ pub fn load_with_args(args: &[String]) -> Result<Config> {
     }
     if args.iter().any(|a| a == "--by-agent") {
         config.by_agent = true;
+    }
+    if args.iter().any(|a| a == "--fail-if-empty") {
+        config.fail_if_empty = true;
     }
 
     // `--since` and `--since-last` answer the same question differently, and

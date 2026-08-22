@@ -351,6 +351,34 @@ rather than dropped, and never guessed at.
 `--json` is unchanged by the flag. It is a documented shape with a schema version, and a second
 arrangement of the same repositories wearing the same version is how a consumer gets quietly broken.
 
+## Running it from cron or CI
+
+```sh
+standup --slack --fail-if-empty && post-to-channel
+```
+
+`--fail-if-empty` exits **2** when there is nothing to report, so a scheduled job can decline to post
+rather than sending an empty message. The digest still prints: the status is for the caller, and
+swallowing the output would remove the one thing that explains a failed run to whoever reads the cron
+mail.
+
+**2, not 1.** A run that fails already exits 1, and a caller that cannot tell the two apart will
+either stay silent on the day something breaks or page somebody about a quiet Sunday:
+
+| status | meaning |
+|---|---|
+| `0` | there is something to report |
+| `2` | nothing to report |
+| `1` | the run failed — a bad window, an unreadable config, a git binary that could not be run |
+
+**"Nothing" is wider than "no commits."** Uncommitted work, an untracked file, a commit that exists
+only here, a branch deleted under a live checkout, a count that could not be read — none of those are
+silence, and all of them exit 0. They are the cases most worth posting. What exits 2 is a window in
+which every repository is quiet and nothing is at risk.
+
+With `--diff`, the comparison is what would be posted, so that is what "empty" describes: a
+comparison where nothing moved exits 2 even though the digest underneath it has commits in it.
+
 ## How it works
 
 <img src="docs/img/pipeline.svg" alt="herdr's session snapshot and your checkouts feed a pipeline: candidate directories, identify, sibling worktrees, window resolution, per-checkout collection, grouping by repository, then the three renderers." width="100%">
@@ -450,6 +478,8 @@ standup --offline --path ~/repos/app --path ~/repos/api
 --busy                Hide repositories with nothing in the window
 --no-siblings         Only checkouts a workspace is sitting in
 --max-commits <N>     Commits listed per checkout before the rest are summarised
+
+--fail-if-empty       Exit 2 when there is nothing to report (see below)
 ```
 
 ## Configuration

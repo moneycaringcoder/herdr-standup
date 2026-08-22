@@ -8,6 +8,22 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- `--fail-if-empty`, which exits **2** when there is nothing to report, so a
+  cron line can decline to post rather than sending an empty message. The digest
+  still prints; the status is for the caller.
+
+  2 rather than 1 because a failure already exits 1, and a caller that cannot
+  tell the two apart will either stay silent on the day something breaks or page
+  somebody about a quiet Sunday.
+
+  "Nothing" is deliberately wider than "no commits": uncommitted work, an
+  untracked file, a commit that exists only here, a branch deleted under a live
+  checkout, a count that could not be read — none of those are silence, and all
+  of them exit 0. They are the cases most worth posting. With `--diff` the
+  comparison is what would be posted, so a comparison where nothing moved exits
+  2 even when the digest underneath has commits in it. Asserted by running the
+  real binary against throwaway repositories, one case per claim.
+
 - `--by-agent`, which groups by agent rather than by repository. Opt-in, and it
   will stay that way: it interleaves unrelated projects, which is the hazard
   repository grouping exists to avoid, and the per-agent totals do not add up to
