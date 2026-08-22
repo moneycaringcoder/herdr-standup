@@ -4,6 +4,7 @@
 //! `tests/` can reach the real modules. A binary-only crate would hide them
 //! behind `#[path]` includes, which break as soon as a module says `crate::`.
 
+pub mod by_agent;
 pub mod clock;
 pub mod compare;
 pub mod config;

@@ -27,30 +27,30 @@ const MD_BRANCH_COLUMNS: usize = 72;
 /// over the paste.
 const MD_SUBJECT_COLUMNS: usize = 120;
 
-pub fn markdown(digest: &Digest, config: &Config) -> String {
+pub fn markdown(digest: &Digest, config: &Config, grouping: Option<&Grouping>) -> String {
     let mut out = String::new();
     header(&mut out, digest);
+    if let Some(grouping) = grouping {
+        paragraph(&mut out, &esc(&grouping.caveat()));
+    }
 
-    let repos = sorted_repos(digest);
-    let busy: Vec<&RepoDigest> = repos
-        .iter()
-        .copied()
-        .filter(|repo| repo.activity() != Activity::Quiet)
-        .collect();
-    let quiet: Vec<&RepoDigest> = repos
-        .iter()
-        .copied()
-        .filter(|repo| repo.activity() == Activity::Quiet)
-        .collect();
+    let sections = sections(digest, grouping);
+    let total: usize = sections.iter().map(|section| section.repos.len()).sum();
+    let busy_anywhere = sections.iter().any(|section| {
+        section
+            .repos
+            .iter()
+            .any(|r| r.activity() != Activity::Quiet)
+    });
 
-    if repos.is_empty() {
+    if total == 0 {
         paragraph(&mut out, "No repositories were found in this session.");
-    } else if busy.is_empty() {
+    } else if !busy_anywhere {
         paragraph(
             &mut out,
             &format!(
                 "Nothing landed in this window, across {}.",
-                quantity(repos.len(), "repository", "repositories")
+                quantity(total, "repository", "repositories")
             ),
         );
     } else {
@@ -59,20 +59,44 @@ pub fn markdown(digest: &Digest, config: &Config) -> String {
             &format!(
                 "{} across {}.",
                 stats(digest.total_commits(), digest.total_churn()),
-                quantity(repos.len(), "repository", "repositories")
+                quantity(digest.repos.len(), "repository", "repositories")
             ),
         );
         let with_date = dates_needed(digest);
         let list_commits = lists_commits(&digest.window);
-        for repo in &busy {
-            repo_bullets(&mut out, repo, config, with_date, list_commits);
+        for section in &sections {
+            if let Some(heading) = &section.heading {
+                out.push_str(&format!(
+                    "\n**{}**{}\n\n",
+                    esc(heading),
+                    section
+                        .stats
+                        .as_deref()
+                        .map(|stats| format!(" \u{2014} {}", esc(stats)))
+                        .unwrap_or_default()
+                ));
+            }
+            for repo in section.busy() {
+                repo_bullets(&mut out, repo, config, with_date, list_commits);
+            }
+            // Under its own heading when there is one: with a grouping, one
+            // repository can be busy in one group and quiet in another, and a
+            // single trailing list would contradict a busy block above it.
+            if section.heading.is_some() {
+                quiet_paragraph(&mut out, section.quiet().map(|repo| esc(&repo.name)));
+            }
         }
         out.push('\n');
     }
 
-    if !quiet.is_empty() {
-        let names: Vec<String> = quiet.iter().map(|repo| esc(&repo.name)).collect();
-        paragraph(&mut out, &format!("Quiet: {}.", names.join(", ")));
+    if sections.iter().all(|section| section.heading.is_none()) {
+        quiet_paragraph(
+            &mut out,
+            sections
+                .iter()
+                .flat_map(|section| section.quiet())
+                .map(|repo| esc(&repo.name)),
+        );
     }
 
     notes(&mut out, digest);
@@ -84,6 +108,16 @@ pub fn markdown(digest: &Digest, config: &Config) -> String {
     }
     out.push('\n');
     out
+}
+
+/// The one place a list of quiet repository names is formatted, so a section's
+/// list and the whole digest's cannot drift apart.
+fn quiet_paragraph(out: &mut String, names: impl Iterator<Item = String>) {
+    let names: Vec<String> = names.collect();
+    if names.is_empty() {
+        return;
+    }
+    paragraph(out, &format!("Quiet: {}.", names.join(", ")));
 }
 
 /// The same comparison as Markdown, for pasting where the digest goes.

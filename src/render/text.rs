@@ -13,24 +13,24 @@
 use super::*;
 use crate::model::Severity;
 
-pub fn text(digest: &Digest, config: &Config) -> String {
+pub fn text(digest: &Digest, config: &Config, grouping: Option<&Grouping>) -> String {
     let mut out = String::new();
     header(&mut out, digest);
+    if let Some(grouping) = grouping {
+        wrapped(&mut out, "  ", "  ", &grouping.caveat());
+    }
 
-    let repos = sorted_repos(digest);
-    let busy: Vec<&RepoDigest> = repos
-        .iter()
-        .copied()
-        .filter(|repo| repo.activity() != Activity::Quiet)
-        .collect();
-    let quiet: Vec<&RepoDigest> = repos
-        .iter()
-        .copied()
-        .filter(|repo| repo.activity() == Activity::Quiet)
-        .collect();
+    let sections = sections(digest, grouping);
+    let total: usize = sections.iter().map(|section| section.repos.len()).sum();
+    let busy_anywhere = sections.iter().any(|section| {
+        section
+            .repos
+            .iter()
+            .any(|r| r.activity() != Activity::Quiet)
+    });
 
     blank(&mut out);
-    if repos.is_empty() {
+    if total == 0 {
         // An empty screen and a quiet day must never look the same.
         wrapped(
             &mut out,
@@ -38,14 +38,14 @@ pub fn text(digest: &Digest, config: &Config) -> String {
             "  ",
             "No repositories were found in this session.",
         );
-    } else if busy.is_empty() {
+    } else if !busy_anywhere {
         wrapped(
             &mut out,
             "  ",
             "  ",
             &format!(
                 "Nothing landed in this window, across {}.",
-                quantity(repos.len(), "repository", "repositories")
+                quantity(total, "repository", "repositories")
             ),
         );
     } else {
@@ -54,25 +54,61 @@ pub fn text(digest: &Digest, config: &Config) -> String {
             &format!(
                 "  {}  across {}",
                 repo_stats(digest.total_commits(), digest.total_churn()),
-                quantity(repos.len(), "repository", "repositories")
+                quantity(digest.repos.len(), "repository", "repositories")
             ),
         );
         let with_date = dates_needed(digest);
         let list_commits = lists_commits(&digest.window);
-        for repo in &busy {
-            blank(&mut out);
-            repo_block(&mut out, repo, config, with_date, list_commits);
+        for section in &sections {
+            if let Some(heading) = &section.heading {
+                blank(&mut out);
+                let stats = section.stats.clone().unwrap_or_default();
+                let width = display_width(&stats);
+                let budget = WIDTH.saturating_sub(width + 4).max(8);
+                let name = truncate_right(heading, budget);
+                let gap = WIDTH
+                    .saturating_sub(2 + display_width(&name) + width)
+                    .max(2);
+                line(&mut out, &format!("  {name}{}{stats}", " ".repeat(gap)));
+            }
+            for repo in section.busy() {
+                blank(&mut out);
+                repo_block(&mut out, repo, config, with_date, list_commits);
+            }
+            // Quiet repositories are named under their own heading when there is
+            // one. A single list at the end would be wrong here rather than
+            // merely terse: with a grouping, one repository can be busy in one
+            // group and quiet in another, and a trailing "quiet: app" beside a
+            // busy `app` block is a contradiction.
+            if section.heading.is_some() {
+                quiet_line(&mut out, section.quiet().map(|repo| repo.name.as_str()));
+            }
         }
     }
 
-    if !quiet.is_empty() {
-        blank(&mut out);
-        let names: Vec<&str> = quiet.iter().map(|repo| repo.name.as_str()).collect();
-        wrapped(&mut out, "  quiet: ", "         ", &names.join(", "));
+    if sections.iter().all(|section| section.heading.is_none()) {
+        quiet_line(
+            &mut out,
+            sections
+                .iter()
+                .flat_map(|section| section.quiet())
+                .map(|repo| repo.name.as_str()),
+        );
     }
 
     notes(&mut out, digest);
     out
+}
+
+/// The one place a list of quiet repository names is formatted, so a section's
+/// list and the whole digest's cannot drift apart.
+fn quiet_line<'a>(out: &mut String, names: impl Iterator<Item = &'a str>) {
+    let names: Vec<&str> = names.collect();
+    if names.is_empty() {
+        return;
+    }
+    blank(out);
+    wrapped(out, "  quiet: ", "         ", &names.join(", "));
 }
 
 /// The terminal comparison.

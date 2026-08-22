@@ -8,6 +8,28 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- `--by-agent`, which groups by agent rather than by repository. Opt-in, and it
+  will stay that way: it interleaves unrelated projects, which is the hazard
+  repository grouping exists to avoid, and the per-agent totals do not add up to
+  the digest's.
+
+  They cannot. Agents are placed per checkout and a commit's author identity is
+  shared by every agent on the machine, so a commit that reaches two groups is
+  counted in both. There are two routes: two agents sharing one checkout, and
+  two checkouts of one repository landing in different groups, because worktrees
+  share history — the second needs only one agent per checkout and was found by
+  running the grouping against a live session rather than reasoned about. So the
+  difference is measured against the digest's own total and printed as a number
+  ("these totals add up to 53 commits more than the digest's") rather than
+  described as a caveat, and both routes are covered by a test.
+
+  Each group's numbers are recomputed over exactly the checkouts that agent
+  occupied, by the union rule the ungrouped digest uses, never inherited from the
+  repository. Work herdr could not attribute is reported as `no agent reported`
+  rather than dropped. `--json` is unchanged by the flag: it carries a schema
+  version, and a second arrangement wearing the same version is how a consumer
+  gets quietly broken.
+
 - `--slack` and `--html`, and a `--format` that accepts `slack` and `html`.
   Both carry the same numbers as the other formats, which is asserted rather
   than assumed: the totals, the churn, the uncommitted counts and the unpushed

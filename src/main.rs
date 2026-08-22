@@ -36,6 +36,10 @@ Window:
 Selection:
   --path <DIR>        Also report this checkout, whether or not herdr knows it
   --offline           Report only --path directories; never touch the socket
+  --by-agent          Group by agent rather than by repository. Opt-in: it
+                      interleaves unrelated projects, and a commit cannot be
+                      split between two agents sharing a checkout, so those are
+                      counted under each and the totals stop reconciling.
   --busy              Hide repositories with nothing in the window
   --all               Show them (the default)
   --no-siblings       Only checkouts a workspace is sitting in
@@ -63,10 +67,11 @@ const VALUED: [&str; 6] = [
 ];
 
 /// Options that stand alone.
-const FLAGS: [&str; 8] = [
+const FLAGS: [&str; 9] = [
     "--since-last",
     "--weekly",
     "--monthly",
+    "--by-agent",
     "--offline",
     "--busy",
     "--all",
