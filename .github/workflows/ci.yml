@@ -23,18 +23,26 @@ jobs:
       # environment disagrees, and a cancelled row tells you nothing.
       fail-fast: false
       matrix:
-        # Two OS families, two architectures, and four different builds of git.
-        # The `*-latest` rows track whatever GitHub currently ships, so the
-        # matrix keeps covering the newest image without being edited; the
-        # pinned rows are the axes worth holding still. `macos-13` is retired
-        # and `ubuntu-22.04` is deprecating, so neither is here: a row that dies
-        # in a month is worse than no row.
+        # Two OS families, two architectures, three runner images. The
+        # `*-latest` rows track whatever GitHub currently ships, so the matrix
+        # keeps covering the newest image without being edited; the pinned rows
+        # are the axes worth holding still. `macos-13` is retired and
+        # `ubuntu-22.04` is deprecating, so neither is here: a row that dies in
+        # a month is worse than no row.
         #
-        # The `newest git` row is the one that earns its place. git 2.55
-        # redefined `--since today` from the current instant to local midnight,
-        # and no distro ships a git new enough to have caught it. Running one
-        # nobody has tried yet is the only way to meet that class of change
-        # before a user does.
+        # Measured on the first run of this matrix: **all five rows are git
+        # 2.55.0**, including the PPA one — the images have converged on the
+        # newest stable release. So this buys OS and architecture coverage
+        # today, not git-version coverage, and the `newest git` row is here to
+        # diverge the moment a newer git ships. git 2.55 redefined
+        # `--since today` from the current instant to local midnight and no
+        # distro shipped a git new enough to have caught it in advance; this row
+        # is what makes the next one visible on the day it lands.
+        #
+        # An *older* git is the other half, and needs a pinned build rather than
+        # a runner image: the `--since-as-filter` fallback and the pre-2.55
+        # reading of `today` are unexercised anywhere right now. Filed
+        # separately.
         include:
           - name: ubuntu-latest
             os: ubuntu-latest

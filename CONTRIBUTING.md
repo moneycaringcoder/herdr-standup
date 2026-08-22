@@ -69,11 +69,20 @@ cargo test --all
 ```
 
 CI runs these on a matrix of five rows: Linux and macOS, arm64 and x86_64, and
-four different builds of git — including one deliberately newer than any distro
-ships, because git 2.55 redefined `--since today` under us and the only way to
-meet that class of change before a user does is to run a git nobody has yet. If
-your local Rust is older than CI's, clippy will pass locally and fail there —
-`rustup update stable` first if in doubt.
+three different runner images, plus one row that installs git from
+`ppa:git-core/ppa` rather than taking the image's. If your local Rust is older
+than CI's, clippy will pass locally and fail there — `rustup update stable`
+first if in doubt.
+
+**Every row currently runs git 2.55.0**, measured, including the PPA one: the
+images have converged on the newest stable release. So the matrix buys operating
+system and architecture coverage today, not git-version coverage. The PPA row is
+there to *diverge* the moment a newer git ships, which is when it starts paying
+for itself — git 2.55 redefined `--since today` from the current instant to local
+midnight, and no distro shipped a git new enough to have caught that in advance.
+Covering an *older* git, which is where the `--since-as-filter` fallback and the
+pre-2.55 reading of `today` live, needs a pinned build rather than a runner
+image; there is an issue for it.
 
 **When a matrix row goes red, read which step failed first.** `tests/git_contract.rs`
 runs on its own, before everything else, and asserts what *git* does with no
