@@ -72,7 +72,8 @@ status, no CI, no generated prose. What the work *meant* is for whoever reads it
 - files touched, lines added and removed
 - the branch, or that HEAD is detached, unborn, or pointing at a branch someone deleted underneath it
 - whether it has an upstream, and how far ahead or behind
-- **whether the work landed** on the repository's default branch
+- **whether the work landed** on the repository's default branch — including under a new sha, which
+  is all a squash or a rebase merge leaves behind
 - uncommitted work still sitting there, which is the difference between "the agent did nothing" and
   "the agent did a day of work and never committed it"
 - which agent was in the workspace, when herdr reports one
@@ -293,13 +294,23 @@ optional and a malformed file is ignored with a warning rather than being fatal.
 }
 ```
 
-## Three decisions you might disagree with
+## Four decisions you might disagree with
 
 **"Merged" means merged into the default branch**, not into the upstream tracking branch, even when
 they differ. "Did it land?" is a question about the trunk; a topic branch pushed to its own remote
 branch has been *published*, not landed, and that is reported separately as upstream tracking. When
 no default branch can be identified the answer is "unknown, and here is why" — never a bare "not
 merged", which reads as a verdict.
+
+**A squash merge and a rebase merge are found, and said differently.** Both rewrite the commit, so
+the sha your checkout holds never reaches the trunk, and the exact question — is this commit an
+ancestor of the default branch? — answers no for work that shipped weeks ago. Since squash merging
+is the default on a great many forges, standup looks for the patch as well: `git cherry` for a
+branch replayed commit by commit, and the patch id of the branch's combined diff for a branch
+squashed into one. A matching patch is strong evidence and not proof, because two commits with the
+same diff are indistinguishable by patch id, so it reads as `on main by patch as 6df5ff43, not by
+sha` rather than `merged into main`. The sha it names is the trunk commit that matched, so the claim
+is one `git show` away from being checked.
 
 **The digest groups by repository, not by time.** Grouping by time would put two commits from one
 branch on opposite sides of an unrelated project's commit. Time still orders everything within a

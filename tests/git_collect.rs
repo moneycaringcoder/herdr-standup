@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use standup::git::Git;
-use standup::model::{Activity, Head, Landed, Tracking};
+use standup::model::{Activity, Equivalence, Head, Landed, Tracking};
 
 use fixtures::{
     window, window_between, Fixture, T_AFTER, T_IN1, T_IN2, T_IN3, T_OLD, T_OLDER, T_SINCE, T_UNTIL,
@@ -797,6 +797,128 @@ fn a_repository_with_no_identifiable_default_branch_says_unknown() {
         ),
         other => panic!("expected Unknown, got {other:?}"),
     }
+}
+
+/// The three ways work can be on the trunk, told apart.
+///
+/// Containment is exact. A squash merge leaves only the branch's combined
+/// patch; a rebase merge leaves every individual patch and not one sha. Before
+/// the last two were detected they were both reported as not merged, which on a
+/// repository that squash-merges is every branch that ever shipped.
+#[test]
+fn exact_squash_and_rebase_landings_are_told_apart() {
+    let fixture = Fixture::new("landing-shapes");
+    let exact = fixture.merged_worktree("exact", "exact");
+    let squashed = fixture.squash_merged_worktree("squashed", "squashed");
+    // Captured here, before the rebase fixture moves the trunk on again: this
+    // is the sha a reader would find by hand, and the plugin has to name it.
+    let squash_oid = fixture.git(&fixture.repo, &["rev-parse", "main"]);
+    let rebased = fixture.rebase_merged_worktree("rebased", "rebased");
+    let git = git();
+
+    let exact = git.report(&id(&git, &exact), &window());
+    assert_eq!(
+        exact.landed,
+        Landed::Merged {
+            into: "main".to_string()
+        },
+        "an exact ancestor must not be downgraded to a patch match: {:?}",
+        exact.problems
+    );
+
+    let squashed = git.report(&id(&git, &squashed), &window());
+    assert_eq!(
+        squashed.landed,
+        Landed::Equivalent {
+            into: "main".to_string(),
+            how: Equivalence::Squashed { oid: squash_oid },
+        },
+        "a squash merge must be found, and by the trunk sha that carries it: {:?}",
+        squashed.problems
+    );
+
+    let rebased = git.report(&id(&git, &rebased), &window());
+    assert_eq!(
+        rebased.landed,
+        Landed::Equivalent {
+            into: "main".to_string(),
+            how: Equivalence::EveryCommit { commits: 2 },
+        },
+        "{:?}",
+        rebased.problems
+    );
+}
+
+/// A reader's own git config must not be able to hide a squash merge.
+///
+/// The two sides of the patch-id comparison are produced by different commands,
+/// and the collector runs against the repository's real configuration.
+/// `diff-tree` is plumbing and takes git's basic diff config; `log` is porcelain
+/// and takes the UI config on top, so `diff.noprefix`, `diff.context` and
+/// `diff.srcPrefix` move one side and not the other. Unpinned, every squash
+/// merge on such a machine goes back to reading as not merged — this exact bug,
+/// restored by a setting that has nothing to do with merging.
+#[test]
+fn a_hostile_diff_config_cannot_hide_a_squash_merge() {
+    let fixture = Fixture::new("hostile-diff-config");
+    let squashed = fixture.squash_merged_worktree("squashed", "squashed");
+    let squash_oid = fixture.git(&fixture.repo, &["rev-parse", "main"]);
+    // Repository-local, because that is the one layer the collector is
+    // guaranteed to read: it scrubs `GIT_DIR` and friends but deliberately not
+    // `HOME`, so a contributor's global config reaches it as well and this test
+    // would otherwise be quietly machine-dependent.
+    for (key, value) in [
+        ("diff.noprefix", "true"),
+        ("diff.context", "7"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.srcPrefix", "i/"),
+        ("diff.dstPrefix", "w/"),
+        ("diff.renames", "copies"),
+        ("diff.algorithm", "histogram"),
+        ("format.pretty", "oneline"),
+    ] {
+        fixture.git(&fixture.repo, &["config", key, value]);
+    }
+    let git = git();
+
+    let report = git.report(&id(&git, &squashed), &window());
+    assert_eq!(
+        report.landed,
+        Landed::Equivalent {
+            into: "main".to_string(),
+            how: Equivalence::Squashed { oid: squash_oid },
+        },
+        "{:?}",
+        report.problems
+    );
+}
+
+/// Half a branch on the trunk is not a landing, and neither probe may round it
+/// up: `git cherry` prints one `-` and one `+`, and the branch's combined patch
+/// matches nothing. Eagerness here would be worse than the bug being fixed —
+/// "safe to delete" is what a reader takes from a landing.
+#[test]
+fn a_partly_cherry_picked_branch_has_not_landed() {
+    let fixture = Fixture::new("partial-landing");
+    let path = fixture.worktree("partial", "partial");
+    fixture.write(&path, "picked.txt", "this one lands\n");
+    fixture.commit_all_at(&path, T_IN1, "the commit that gets picked");
+    fixture.write(&path, "left-behind.txt", "this one does not\n");
+    fixture.commit_all_at(&path, T_IN2, "the commit that stays behind");
+
+    let picked = fixture.git(&path, &["rev-parse", "HEAD~1"]);
+    fixture.git_at(&fixture.repo, T_IN3, T_IN3, &["cherry-pick", &picked]);
+
+    let git = git();
+    let report = git.report(&id(&git, &path), &window());
+    assert_eq!(
+        report.landed,
+        Landed::NotMerged {
+            into: "main".to_string()
+        },
+        "{:?}",
+        report.problems
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -34,6 +34,33 @@ All notable changes to this project are recorded here. The format follows
   those and standup worked for you, say so on the issue tracker and the floor
   can come back down with evidence behind it.
 
+### Fixed
+
+- Work that shipped through a **squash merge or a rebase merge** is no longer
+  reported as not landed. "Did it land?" was answered with
+  `git merge-base --is-ancestor` alone, which is exact for a fast-forward and
+  for a merge commit and asks the wrong question of a rewritten commit: both a
+  squash and a rebase leave the trunk carrying a sha the checkout has never
+  seen. Squash merging is the default on a great many forges, so on most
+  repositories this was every branch that ever shipped. standup now looks for
+  the patch as well — `git cherry` for a branch replayed commit by commit, and
+  the patch id of the branch's combined diff against the fork point for a
+  branch squashed into one, because a squash destroys every individual patch id
+  and the combined one is all that survives. A matching patch is strong
+  evidence and not proof, since two commits with the same diff share a patch
+  id, so it is reported as its own state rather than folded into "merged": the
+  digest reads `on main by patch as 6df5ff43, not by sha`, and `--json` carries
+  a new `landed.kind` of `equivalent`, with `landed.how.kind` saying which probe
+  answered and `landed.how.oid` naming the trunk commit that matched. Nothing
+  that was already exact changed; a branch only partly cherry-picked onto the
+  trunk still reads as not merged; and a probe that could not be *run* — a
+  shallow clone, a missing object — is reported as `merge status unknown` with
+  the command and its stderr, never as a verdict. The two diffs a patch id is
+  computed from are produced with the diff options pinned explicitly, because
+  `diff-tree` reads git's basic diff config while `log` also reads the UI config:
+  unpinned, a reader's own `diff.noprefix`, `diff.context` or `diff.srcPrefix`
+  silently reinstated the whole bug.
+
 ## [0.1.0] - 2026-08-16
 
 ### Added

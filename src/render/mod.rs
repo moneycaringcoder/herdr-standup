@@ -33,8 +33,8 @@ use std::path::Path;
 
 use crate::config::{Config, Format};
 use crate::model::{
-    Activity, AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Head, Landed,
-    RepoDigest, Stamp, Tracking, Window, WindowSource,
+    Activity, AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Equivalence,
+    Head, Landed, RepoDigest, Stamp, Tracking, Window, WindowSource,
 };
 use crate::Result;
 
@@ -226,13 +226,34 @@ pub(crate) fn abbrev_oid(oid: &str) -> &str {
     &oid[..end]
 }
 
-/// Whether the work has landed on the default branch. Four states, four
+/// Whether the work has landed on the default branch. Five states, five
 /// sentences — and never a bare `false`, which would read as "did not land"
 /// when what we mean is "there was nothing to compare against".
+///
+/// "Merged" is kept for containment, which is exact. A squash or a rebase
+/// merge only leaves a matching patch behind, and a matching patch is strong
+/// evidence rather than proof, so those get "by patch, not by sha" and name
+/// what was matched — the reader can re-run `git cherry` or `git patch-id` and
+/// see the same thing.
 pub(crate) fn landed_sentence(landed: &Landed, ref_max: usize) -> String {
     match landed {
         Landed::IsDefault { name } => format!("on the default branch {}", ref_name(name, ref_max)),
         Landed::Merged { into } => format!("merged into {}", ref_name(into, ref_max)),
+        Landed::Equivalent {
+            into,
+            how: Equivalence::EveryCommit { .. },
+        } => format!(
+            "every commit is on {} by patch, not by sha",
+            ref_name(into, ref_max)
+        ),
+        Landed::Equivalent {
+            into,
+            how: Equivalence::Squashed { oid },
+        } => format!(
+            "on {} by patch as {}, not by sha",
+            ref_name(into, ref_max),
+            abbrev_oid(oid)
+        ),
         Landed::NotMerged { into } => format!("not merged into {}", ref_name(into, ref_max)),
         Landed::Unknown { reason } => format!("merge status unknown: {reason}"),
     }

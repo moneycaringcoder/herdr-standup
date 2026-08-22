@@ -89,7 +89,7 @@
 //! paths arrive as raw bytes rather than C-quoted, so a filename containing a
 //! space, a newline or a non-UTF-8 byte survives.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -97,7 +97,8 @@ use std::time::{Duration, Instant};
 use crate::clock;
 use crate::config::DEFAULT_BRANCH_CANDIDATES;
 use crate::model::{
-    CheckoutReport, Churn, Commit, Dirty, Head, Landed, RepoKey, Stamp, Tracking, Window,
+    CheckoutReport, Churn, Commit, Dirty, Equivalence, Head, Landed, RepoKey, Stamp, Tracking,
+    Window,
 };
 use crate::Result;
 
@@ -132,6 +133,40 @@ const SPECS_MEANING_NOW: &[&str] = &["now", "today"];
 /// How close to the current instant a resolved date has to be before it is
 /// treated as git's silent "I could not parse that" answer.
 const NOW_SLACK_SECONDS: i64 = 2;
+
+/// The diff options both sides of a patch-id comparison must be produced with.
+///
+/// Not a matter of taste. `git patch-id` hashes the diff it is handed, so two
+/// diffs of the same change hash differently when they were produced with
+/// different options — and the two commands compared here do not read the same
+/// configuration: `diff-tree` is plumbing and takes git's *basic* diff config,
+/// while `log` is porcelain and takes the *UI* config on top of it.
+///
+/// Measured on git 2.53.0, replaying these invocations against a three-commit
+/// branch squash-merged onto a moved-on trunk. With an empty global config the
+/// squash is found; with any one of `diff.noprefix = true`, `diff.context = 5`,
+/// or a custom `diff.srcPrefix`/`diff.dstPrefix` in the **reader's own**
+/// `~/.gitconfig`, only the `log` side moved and every squash merge on that
+/// machine went back to reading as "not merged" — the exact bug, restored
+/// silently by a setting that has nothing to do with merging.
+///
+/// So each is pinned rather than inherited:
+///
+/// - `-U3`, `--src-prefix`, `--dst-prefix` against `diff.context`,
+///   `diff.noprefix`, `diff.srcPrefix`, `diff.dstPrefix` and
+///   `diff.mnemonicPrefix`, which only the porcelain side honours.
+/// - `--no-renames`, because rename detection rewrites the headers the id is
+///   built from, and `diff.renames` is on by default in porcelain. It also
+///   keeps these diffs consistent with the `log --numstat` above.
+/// - `--no-textconv`, for symmetry, and so nothing named in a `.gitattributes`
+///   is executed on the way past.
+const PATCH_ID_DIFF_OPTIONS: &[&str] = &[
+    "-U3",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    "--no-renames",
+    "--no-textconv",
+];
 
 /// A directory that git has confirmed is a checkout, with its repository
 /// identity resolved.
@@ -174,8 +209,22 @@ impl GitOut {
         String::from_utf8_lossy(&self.stdout).trim().to_string()
     }
 
+    /// Stderr as a single line.
+    ///
+    /// Everything this feeds is rendered as one clause — a problem note, or the
+    /// reason attached to a merge status — and git's stderr is routinely several
+    /// lines, a `warning:` followed by a `fatal:`. Left as-is, the newline
+    /// escapes into the middle of a digest and breaks the layout of both
+    /// renderers.
     fn stderr_text(&self) -> String {
-        String::from_utf8_lossy(&self.stderr).trim().to_string()
+        let text = String::from_utf8_lossy(&self.stderr);
+        let mut words = text.split_whitespace();
+        let mut line = words.next().unwrap_or_default().to_string();
+        for word in words {
+            line.push(' ');
+            line.push_str(word);
+        }
+        line
     }
 }
 
@@ -769,6 +818,14 @@ impl Git {
 
     /// Whether the work has landed on the default branch.
     ///
+    /// Two questions, asked in that order. `merge-base --is-ancestor` answers
+    /// the exact one — is this commit *on* the trunk — and is the whole answer
+    /// for a fast-forward or a merge commit. It is the wrong question for a
+    /// squash merge or a rebase merge, which rewrite the commit, so the sha
+    /// that shipped is not the sha this checkout holds; see
+    /// [`Git::equivalent_patch`] for the second question and why a bare
+    /// `NotMerged` there reported shipped work as unlanded.
+    ///
     /// Never a bare `NotMerged` when the question could not be asked: "we could
     /// not find a default branch" and "this did not land" are opposite messages
     /// to the person reading the digest.
@@ -811,17 +868,212 @@ impl Git {
         };
         match out.code {
             Some(0) => Landed::Merged { into: default },
-            Some(1) => Landed::NotMerged { into: default },
+            // Exit 1 is "not contained", which is not the same as "did not
+            // land"; see `equivalent_patch`. A probe that could not be run is
+            // not an answer either, and must not arrive as one.
+            Some(1) => match self.equivalent_patch(path, oid, &default, problems) {
+                Ok(Some(how)) => Landed::Equivalent { into: default, how },
+                Ok(None) => Landed::NotMerged { into: default },
+                Err(reason) => Landed::Unknown {
+                    reason: format!(
+                        "HEAD is not on {default} by sha, and {reason}, so a squash or rebase \
+                         merge cannot be ruled out"
+                    ),
+                },
+            },
             other => Landed::Unknown {
                 reason: format!(
                     "git merge-base --is-ancestor exited {} against {default}: {}",
-                    other
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "on a signal".into()),
+                    exit_label(other),
                     out.stderr_text()
                 ),
             },
         }
+    }
+
+    /// Looks for this branch's work on the trunk under a different sha.
+    ///
+    /// Squash merging is the default on a great many forges, and a squash or a
+    /// rebase merge rewrites the commit — so the sha this checkout holds never
+    /// appears on the default branch and containment, which is exact, says the
+    /// work did not land. It shipped.
+    ///
+    /// Two probes, because neither alone covers both shapes. Measured on git
+    /// 2.53.0 against a three-commit branch squash-merged onto a trunk that had
+    /// moved on since the fork point:
+    ///
+    /// ```text
+    /// merge-base --is-ancestor            exit 1        (correct, and useless)
+    /// git cherry main topic               + + +         no individual patch survived
+    /// combined diff-tree | patch-id       450e3211…  ->  6df5ff43… on main
+    /// ```
+    ///
+    /// A rebase merge is the mirror image: every commit keeps its own patch, so
+    /// `git cherry` marks them all `-`, while the combined id matches nothing
+    /// because the trunk range carries other people's commits too.
+    ///
+    /// Neither result is proof. Two commits with the same diff have the same
+    /// patch id, so this is reported as [`Landed::Equivalent`] and never folded
+    /// into [`Landed::Merged`].
+    fn equivalent_patch(
+        &self,
+        path: &Path,
+        oid: &str,
+        default: &str,
+        problems: &mut Vec<String>,
+    ) -> std::result::Result<Option<Equivalence>, String> {
+        // Both probes are relative to the fork point. Unrelated histories have
+        // none, and `merge-base` says so with exit 1 — that is an answer, not a
+        // failure: there is nothing there for the work to have landed into.
+        let base = match self.capture(path, &["merge-base", oid, default], problems) {
+            Some(out) if out.ok() => out.stdout_text(),
+            Some(out) if out.code == Some(1) => return Ok(None),
+            Some(out) => {
+                return Err(format!(
+                    "git merge-base exited {}: {}",
+                    exit_label(out.code),
+                    out.stderr_text()
+                ))
+            }
+            None => return Err("git merge-base could not be run".to_string()),
+        };
+        if base.is_empty() {
+            return Ok(None);
+        }
+
+        // `git cherry <upstream> <head>` prints one line per commit on the
+        // branch: `-` when an equivalent patch is already upstream, `+` when it
+        // is not. Nothing but `-` means every commit arrived by another route.
+        // Cheapest first: one process, and it is the command a reader re-runs.
+        let cherry = self.probe(path, &["cherry", default, oid], problems)?;
+        let mut commits = 0u64;
+        let mut all_upstream = true;
+        for line in cherry.lines().filter(|line| !line.trim().is_empty()) {
+            commits += 1;
+            all_upstream &= line.starts_with('-');
+        }
+        if commits > 0 && all_upstream {
+            return Ok(Some(Equivalence::EveryCommit { commits }));
+        }
+
+        // A squash merge collapses the branch into one commit, so no individual
+        // patch id survives it. What does survive is the id of the branch's
+        // *combined* diff against the fork point, which is exactly the diff the
+        // squash commit carries.
+        let Some((wanted, _)) = self
+            .patch_ids(path, &diff_args(&["diff-tree", &base, oid]), problems)?
+            .into_iter()
+            .next()
+        else {
+            // An empty diff between the fork point and HEAD cannot be the thing
+            // a squash commit carries, and `cherry` has already spoken for the
+            // individual patches.
+            return Ok(None);
+        };
+        let range = format!("{base}..{default}");
+        Ok(self
+            .patch_ids(
+                path,
+                &diff_args(&[
+                    "log",
+                    // A merge commit prints a header and no diff, which would
+                    // hand the next commit's patch to the wrong sha.
+                    "--no-merges",
+                    // `patch-id` reads the sha off the `commit <sha>` line that
+                    // git's default format happens to print, so a host
+                    // `format.pretty` would otherwise take it away and leave
+                    // every id attributed to nothing.
+                    "--format=commit %H",
+                    &range,
+                ]),
+                problems,
+            )?
+            .into_iter()
+            .find(|(id, _)| *id == wanted)
+            .map(|(_, oid)| Equivalence::Squashed { oid }))
+    }
+
+    /// A probe whose exit status is not an answer: anything but success means
+    /// the question could not be asked, which the caller must keep apart from
+    /// "the patch is not there".
+    fn probe(
+        &self,
+        path: &Path,
+        args: &[&str],
+        problems: &mut Vec<String>,
+    ) -> std::result::Result<String, String> {
+        let name = args.first().copied().unwrap_or("?");
+        match self.capture(path, args, problems) {
+            Some(out) if out.ok() => Ok(out.stdout_text()),
+            Some(out) => Err(format!(
+                "git {name} exited {}: {}",
+                exit_label(out.code),
+                out.stderr_text()
+            )),
+            None => Err(format!("git {name} could not be run")),
+        }
+    }
+
+    /// `<args> | git patch-id --stable`, as `(patch id, commit)` pairs.
+    ///
+    /// `--stable` rather than the default, because it hashes each file
+    /// independently: the id then does not depend on the order git happened to
+    /// emit the files in, and `diff-tree` and `log` need not agree on that.
+    ///
+    /// The diff is buffered and handed to `patch-id` on stdin rather than joined
+    /// to it by a pipe, and the reason is the exit status. Buffered, the source's
+    /// status is checked *before* the sink ever runs; piped, a source that died
+    /// partway would leave `patch-id` exiting 0 over a truncated stream, and
+    /// "the ids I found do not include yours" must never be mistaken for "the
+    /// patch is not on the trunk" — the one distinction
+    /// [`Git::equivalent_patch`] exists to keep. It also keeps the deadline and
+    /// the pipe draining in [`Git::run_env`] instead of duplicating both. The
+    /// buffer is moved, not copied: it is the source's own captured stdout.
+    ///
+    /// The cost of that buffer on a stale branch of a busy trunk is real and is
+    /// filed separately; it is a question about speed, not about the answer.
+    fn patch_ids(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        problems: &mut Vec<String>,
+    ) -> std::result::Result<Vec<(String, String)>, String> {
+        let name = args.first().copied().unwrap_or("?");
+        let diff = match self.capture(dir, args, problems) {
+            Some(out) if out.ok() => out.stdout,
+            Some(out) => {
+                return Err(format!(
+                    "git {name} exited {}: {}",
+                    exit_label(out.code),
+                    out.stderr_text()
+                ))
+            }
+            None => return Err(format!("git {name} could not be run")),
+        };
+        if diff.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = match self.capture_stdin(dir, &["patch-id", "--stable"], diff, problems) {
+            Some(out) if out.ok() => out.stdout_text(),
+            Some(out) => {
+                return Err(format!(
+                    "git patch-id exited {}: {}",
+                    exit_label(out.code),
+                    out.stderr_text()
+                ))
+            }
+            None => return Err("git patch-id could not be run".to_string()),
+        };
+        Ok(ids
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                // Both fields or neither. The sha is what makes the verdict
+                // checkable by hand, and `patch-id` always prints one, so a
+                // line without it is not a shape to accommodate.
+                Some((fields.next()?.to_string(), fields.next()?.to_string()))
+            })
+            .collect())
     }
 
     /// The repository's default branch, as a resolvable ref name.
@@ -872,7 +1124,7 @@ impl Git {
     /// problems on the report. A non-zero exit is handed back for the caller to
     /// interpret, because for most of these commands it is an answer.
     fn capture(&self, dir: &Path, args: &[&str], problems: &mut Vec<String>) -> Option<GitOut> {
-        self.capture_env(dir, args, &[], problems)
+        self.capture_full(dir, args, &[], None, problems)
     }
 
     /// [`Git::capture`] with extra environment, used only to point
@@ -884,7 +1136,30 @@ impl Git {
         extra_env: &[(&str, &Path)],
         problems: &mut Vec<String>,
     ) -> Option<GitOut> {
-        match self.run_env(dir, args, extra_env) {
+        self.capture_full(dir, args, extra_env, None, problems)
+    }
+
+    /// [`Git::capture`] with a diff on stdin, used only to feed
+    /// [`Git::patch_ids`].
+    fn capture_stdin(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        stdin: Vec<u8>,
+        problems: &mut Vec<String>,
+    ) -> Option<GitOut> {
+        self.capture_full(dir, args, &[], Some(stdin), problems)
+    }
+
+    fn capture_full(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        extra_env: &[(&str, &Path)],
+        stdin: Option<Vec<u8>>,
+        problems: &mut Vec<String>,
+    ) -> Option<GitOut> {
+        match self.run_full(dir, args, extra_env, stdin) {
             Ok(out) if out.timed_out => {
                 problems.push(format!(
                     "git {} timed out after {:?} in {}",
@@ -935,19 +1210,32 @@ impl Git {
     /// a child that fills the 64 KiB pipe buffer blocks forever otherwise, and
     /// `log --numstat` over a busy day comfortably exceeds that.
     fn run(&self, dir: &Path, args: &[&str]) -> Result<GitOut> {
-        self.run_env(dir, args, &[])
+        self.run_full(dir, args, &[], None)
     }
 
     /// [`Git::run`], with environment this module sets on purpose applied
-    /// *after* the inherited environment is scrubbed.
-    fn run_env(&self, dir: &Path, args: &[&str], extra_env: &[(&str, &Path)]) -> Result<GitOut> {
+    /// *after* the inherited environment is scrubbed, and an optional payload
+    /// on the child's stdin.
+    fn run_full(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        extra_env: &[(&str, &Path)],
+        stdin: Option<Vec<u8>>,
+    ) -> Result<GitOut> {
         let mut command = Command::new(&self.program);
         command.arg("-C").arg(dir);
         // Global, before the subcommand: plain `status` takes `index.lock` to
         // write back its stat cache, and this plugin promises never to write.
         command.arg("--no-optional-locks");
         command.args(args);
-        command.stdin(Stdio::null());
+        // Nothing here reads a terminal, so the default is a closed stdin; the
+        // one command that takes a payload is `patch-id`.
+        command.stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
@@ -1005,6 +1293,17 @@ impl Git {
             buffer
         });
 
+        // On its own thread, for the same reason the readers are on theirs: the
+        // deadline below only has teeth if nothing above it can block forever,
+        // and a child that stops reading its stdin would otherwise hang the
+        // digest — the one thing this runner exists to prevent. Dropping the
+        // pipe at the end of the closure closes it, which is what tells the
+        // child the diff has ended.
+        let writer = stdin.map(|payload| {
+            let mut pipe = child.stdin.take().expect("stdin is piped");
+            std::thread::spawn(move || pipe.write_all(&payload))
+        });
+
         let deadline = Instant::now() + self.timeout;
         let mut backoff = Duration::from_micros(200);
         let mut timed_out = false;
@@ -1023,6 +1322,33 @@ impl Git {
                 Err(err) => return Err(format!("waiting for git: {err}").into()),
             }
         };
+
+        // The child exiting for any reason breaks the pipe, so this join cannot
+        // outlive the wait above. Any failed write is then reported, including a
+        // broken pipe: `patch-id` reads its stdin to EOF, so it cannot have
+        // stopped early and still be right, and a short write would leave it
+        // hashing a truncated diff and answering confidently. A confident wrong
+        // answer is the one outcome this module never permits. A killed child is
+        // the exception, already spoken for by `timed_out`.
+        if let Some(writer) = writer {
+            let wrote = writer.join().map_err(|_| {
+                format!(
+                    "the thread feeding git {} in {} panicked",
+                    args.first().copied().unwrap_or("?"),
+                    dir.display()
+                )
+            })?;
+            if let Err(err) = wrote {
+                if !timed_out {
+                    return Err(format!(
+                        "could not feed git {} in {}: {err}",
+                        args.first().copied().unwrap_or("?"),
+                        dir.display()
+                    )
+                    .into());
+                }
+            }
+        }
 
         Ok(GitOut {
             code: status.code(),
@@ -1281,6 +1607,28 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable(path: &Path) -> bool {
     path.is_file()
+}
+
+/// How a child ended, in words: a process killed by a signal has no code, and
+/// "exited none" is not something to show a reader.
+fn exit_label(code: Option<i32>) -> String {
+    code.map(|code| code.to_string())
+        .unwrap_or_else(|| "on a signal".to_string())
+}
+
+/// Splices [`PATCH_ID_DIFF_OPTIONS`] into a diff-producing command.
+///
+/// `command` is the subcommand followed by its own arguments, and the pinned
+/// options land between them, so a caller cannot compare two diffs that were
+/// produced differently — which is the whole failure this guards.
+fn diff_args<'a>(command: &[&'a str]) -> Vec<&'a str> {
+    let (subcommand, rest) = command.split_first().expect("a subcommand to run");
+    let mut args = Vec::with_capacity(command.len() + PATCH_ID_DIFF_OPTIONS.len() + 1);
+    args.push(*subcommand);
+    args.push("-p");
+    args.extend_from_slice(PATCH_ID_DIFF_OPTIONS);
+    args.extend_from_slice(rest);
+    args
 }
 
 #[cfg(test)]

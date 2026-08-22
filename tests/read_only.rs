@@ -374,6 +374,13 @@ fn kitchen_sink(tag: &str) -> (Fixture, Vec<PathBuf>) {
     let unborn = fixture.unborn_worktree("unborn", "unborn");
     let deleted = fixture.deleted_branch_worktree("deleted", "doomed");
 
+    // Squash-merged: the only shape that runs the patch-id probes to
+    // completion. `git cherry` finds nothing, so the branch's combined diff is
+    // taken with `diff-tree -p` and compared against every commit on the trunk
+    // with `log -p`, and both are piped through `patch-id`. None of the three
+    // may touch the index — `diff` refreshing it is what this file exists for.
+    let squashed = fixture.squash_merged_worktree("squashed", "squashed");
+
     // Uncommitted work — staged, unstaged, renamed, untracked and ignored — in
     // the places most likely to be written back somewhere they should not be.
     fixture.dirty_up(&fixture.repo);
@@ -392,6 +399,7 @@ fn kitchen_sink(tag: &str) -> (Fixture, Vec<PathBuf>) {
         detached,
         unborn,
         deleted,
+        squashed,
     ];
     (fixture, worktrees)
 }

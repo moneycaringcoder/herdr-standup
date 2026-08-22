@@ -9,22 +9,6 @@ A feature that cannot meet that does not belong here.
 
 ## Correctness
 
-### Detect squash and rebase merges
-
-This is the most important entry in this file.
-
-"Did it land?" is answered with `git merge-base --is-ancestor <head> <default>`,
-which is exact for a fast-forward or a merge commit and **wrong for a squash
-merge or a rebase merge**, because both rewrite the commit and the original sha
-never appears on the default branch. The digest reports that work as not landed
-when it has in fact shipped.
-
-Squash merging is the default on a great many repositories, so this is not an edge
-case. `git cherry`, or comparing patch ids, would recognize the rewritten commit.
-The reporting should stay careful in the same way the current answer is: an
-equivalent patch found on the trunk is strong evidence, not proof, and it should
-read differently from an exact ancestor.
-
 ### Report committed but unpushed work
 
 The digest already separates "the agent did nothing" from "the agent did a day of
