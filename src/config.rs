@@ -217,6 +217,11 @@ pub struct Config {
     /// window from the local clock and suppresses the per-commit lines, because
     /// a month listed commit by commit is not a digest.
     pub rollup: Option<Period>,
+    /// Group by agent rather than by repository. **Opt-in, never the default**:
+    /// repository grouping keeps a branch's commits together, and agent grouping
+    /// interleaves unrelated projects for the same reason grouping by time
+    /// would. See `by_agent`.
+    pub by_agent: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +272,8 @@ impl Default for Config {
                 .map(|pattern| pattern.to_string())
                 .collect(),
             rollup: None,
+            // Never the default. Repository grouping is the deliberate choice.
+            by_agent: false,
         }
     }
 }
@@ -313,6 +320,9 @@ pub fn load_with_args(args: &[String]) -> Result<Config> {
     }
     if args.iter().any(|a| a == "--monthly") {
         config.rollup = Some(Period::Month);
+    }
+    if args.iter().any(|a| a == "--by-agent") {
+        config.by_agent = true;
     }
 
     // `--since` and `--since-last` answer the same question differently, and

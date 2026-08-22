@@ -7,15 +7,6 @@ The standard everything below is held to is the one in the README: **every numbe
 is one git command away from being checked by hand, and none of them is a guess.**
 A feature that cannot meet that does not belong here.
 
-## More ways to read it
-
-### Optional grouping by agent
-
-Grouping by repository is deliberate: grouping by time would put two commits from
-one branch on opposite sides of an unrelated project's commits. Agent grouping has
-the same hazard and should stay opt-in — but "what did shear-classifier do this
-week" is a real question the data can answer.
-
 ## Operating it
 
 ### `--fail-if-empty`

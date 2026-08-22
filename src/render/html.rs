@@ -37,7 +37,7 @@ const FONT: &str =
     "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif";
 const MONO: &str = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
 
-pub fn html(digest: &Digest, config: &Config) -> String {
+pub fn html(digest: &Digest, config: &Config, grouping: Option<&Grouping>) -> String {
     let mut out = String::new();
     open(&mut out, "standup");
 
@@ -62,26 +62,30 @@ pub fn html(digest: &Digest, config: &Config) -> String {
         out.push_str("<div style=\"height:16px\"></div>\n");
     }
 
-    let repos = sorted_repos(digest);
-    let busy: Vec<&RepoDigest> = repos
-        .iter()
-        .copied()
-        .filter(|repo| repo.activity() != Activity::Quiet)
-        .collect();
-    let quiet: Vec<&RepoDigest> = repos
-        .iter()
-        .copied()
-        .filter(|repo| repo.activity() == Activity::Quiet)
-        .collect();
+    if let Some(grouping) = grouping {
+        out.push_str(&format!(
+            "<p style=\"{FONT};font-size:13px;color:{QUIET};margin:0 0 16px\">{}</p>\n",
+            esc(&grouping.caveat())
+        ));
+    }
 
-    if repos.is_empty() {
+    let sections = sections(digest, grouping);
+    let total: usize = sections.iter().map(|section| section.repos.len()).sum();
+    let busy_anywhere = sections.iter().any(|section| {
+        section
+            .repos
+            .iter()
+            .any(|r| r.activity() != Activity::Quiet)
+    });
+
+    if total == 0 {
         paragraph(&mut out, "No repositories were found in this session.");
-    } else if busy.is_empty() {
+    } else if !busy_anywhere {
         paragraph(
             &mut out,
             &format!(
                 "Nothing landed in this window, across {}.",
-                quantity(repos.len(), "repository", "repositories")
+                quantity(total, "repository", "repositories")
             ),
         );
     } else {
@@ -89,22 +93,43 @@ pub fn html(digest: &Digest, config: &Config) -> String {
             "<p style=\"{FONT};font-size:15px;font-weight:600;color:{INK};margin:0 0 16px\">\
              {} across {}</p>\n",
             esc(&stats(digest.total_commits(), digest.total_churn())),
-            quantity(repos.len(), "repository", "repositories")
+            quantity(digest.repos.len(), "repository", "repositories")
         ));
         let with_date = dates_needed(digest);
         let list_commits = lists_commits(&digest.window);
-        for repo in &busy {
-            repo_block(&mut out, repo, config, with_date, list_commits);
+        for section in &sections {
+            if let Some(heading) = &section.heading {
+                out.push_str(&format!(
+                    "<p style=\"{FONT};font-size:15px;font-weight:600;color:{INK};\
+                     margin:20px 0 8px\">{}{}</p>\n",
+                    esc(heading),
+                    section
+                        .stats
+                        .as_deref()
+                        .map(|stats| format!(" \u{2014} {}", esc(stats)))
+                        .unwrap_or_default()
+                ));
+            }
+            for repo in section.busy() {
+                repo_block(&mut out, repo, config, with_date, list_commits);
+            }
+            // Under its own heading when there is one: with a grouping, one
+            // repository can be busy in one group and quiet in another, and a
+            // single trailing list would contradict a busy block above it.
+            if section.heading.is_some() {
+                quiet_paragraph(&mut out, section.quiet().map(|repo| esc(&repo.name)));
+            }
         }
     }
 
-    if !quiet.is_empty() {
-        let names: Vec<String> = quiet.iter().map(|repo| esc(&repo.name)).collect();
-        out.push_str(&format!(
-            "<p style=\"{FONT};font-size:13px;color:{QUIET};margin:16px 0 0\">\
-             Quiet: {}.</p>\n",
-            names.join(", ")
-        ));
+    if sections.iter().all(|section| section.heading.is_none()) {
+        quiet_paragraph(
+            &mut out,
+            sections
+                .iter()
+                .flat_map(|section| section.quiet())
+                .map(|repo| esc(&repo.name)),
+        );
     }
 
     for note in &digest.notes {
@@ -121,6 +146,19 @@ pub fn html(digest: &Digest, config: &Config) -> String {
 
     close(&mut out);
     out
+}
+
+/// The one place a list of quiet repository names is formatted, so a section's
+/// list and the whole digest's cannot drift apart.
+fn quiet_paragraph(out: &mut String, names: impl Iterator<Item = String>) {
+    let names: Vec<String> = names.collect();
+    if names.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "<p style=\"{FONT};font-size:13px;color:{QUIET};margin:16px 0 0\">Quiet: {}.</p>\n",
+        names.join(", ")
+    ));
 }
 
 /// The comparison, as an email.

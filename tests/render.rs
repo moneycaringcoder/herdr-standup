@@ -298,11 +298,11 @@ fn busy_repo() -> RepoDigest {
 }
 
 fn plain(digest: &Digest) -> String {
-    text(digest, &Config::default())
+    text(digest, &Config::default(), None)
 }
 
 fn md(digest: &Digest) -> String {
-    markdown(digest, &Config::default())
+    markdown(digest, &Config::default(), None)
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,7 +1362,7 @@ fn the_commits_that_do_not_fit_are_counted_never_dropped() {
         ..Config::default()
     };
 
-    let report = text(&digest, &config);
+    let report = text(&digest, &config, None);
     let flat = flatten(&report);
     assert!(flat.contains("3 more commits not listed"), "{report}");
     // The newest survive, the oldest are the ones counted.
@@ -1372,7 +1372,7 @@ fn the_commits_that_do_not_fit_are_counted_never_dropped() {
     // The total is still stated in full.
     assert!(flat.contains("5 commits"), "{report}");
 
-    let pasted = flatten(&markdown(&digest, &config));
+    let pasted = flatten(&markdown(&digest, &config, None));
     assert!(pasted.contains("3 more commits not listed"), "{pasted}");
     assert!(pasted.contains("5 commits"), "{pasted}");
 }
@@ -1384,7 +1384,7 @@ fn listing_no_commits_at_all_still_reports_how_many_there_were() {
         max_commits: 0,
         ..Config::default()
     };
-    let flat = flatten(&text(&digest, &config));
+    let flat = flatten(&text(&digest, &config, None));
     assert!(flat.contains("5 commits not listed"), "{flat}");
     assert!(!flat.contains("Commit number"), "{flat}");
 }
@@ -1396,7 +1396,7 @@ fn a_single_held_back_commit_is_counted_in_the_singular() {
         max_commits: 4,
         ..Config::default()
     };
-    let flat = flatten(&text(&digest, &config));
+    let flat = flatten(&text(&digest, &config, None));
     assert!(flat.contains("1 more commit not listed"), "{flat}");
     assert!(!flat.contains("1 more commits"), "{flat}");
 }

@@ -315,6 +315,42 @@ Both carry the same numbers as the other formats. That is asserted rather than a
 the churn, the uncommitted counts and the unpushed count are extracted from all four renderings and
 compared, because **a format is a rendering and never a different answer**.
 
+## Grouping by agent
+
+```sh
+standup --by-agent
+```
+
+"What did shear-classifier do this week." Opt-in, and it will stay opt-in, for two reasons that the
+digest states above the first group rather than leaving you to find out:
+
+**It interleaves unrelated projects.** Grouping by repository is deliberate — grouping by time would
+put two commits from one branch on opposite sides of an unrelated project's commit, and one agent's
+work is spread across repositories, so agent grouping has the same hazard from the other direction.
+
+**The totals stop adding up, and it says by how much.** A commit cannot be split between two agents,
+because agents are placed per *checkout* and a commit's author identity is shared by every agent on
+the machine — three agents, one author identity is the normal shape. So a commit that reaches two
+groups is counted in both, and there are two ways for that to happen: two agents sharing one
+checkout, and two checkouts of one repository landing in different groups, since worktrees share
+history. The second needs only one agent per checkout, which is the ordinary case, and it is why the
+difference is **measured against the digest's own total** rather than described:
+
+```text
+grouped by agent, which interleaves unrelated projects — the default grouping is by repository.
+These totals add up to 53 commits more than the digest's, because a commit cannot be split between
+two agents sharing a checkout, or between two checkouts of one repository in different groups, so it
+is counted in each
+```
+
+Each group's numbers are recomputed over exactly the checkouts that agent occupied, by the same union
+rule the ungrouped digest uses — never inherited from the repository, which would credit an agent
+with a sibling worktree's work. Work herdr could not attribute is reported under `no agent reported`
+rather than dropped, and never guessed at.
+
+`--json` is unchanged by the flag. It is a documented shape with a schema version, and a second
+arrangement of the same repositories wearing the same version is how a consumer gets quietly broken.
+
 ## How it works
 
 <img src="docs/img/pipeline.svg" alt="herdr's session snapshot and your checkouts feed a pipeline: candidate directories, identify, sibling worktrees, window resolution, per-checkout collection, grouping by repository, then the three renderers." width="100%">
@@ -410,6 +446,7 @@ standup --offline --path ~/repos/app --path ~/repos/api
 
 --path <DIR>          Also report this checkout, whether or not herdr knows it
 --offline             Report only --path directories; never touch the socket
+--by-agent            Group by agent rather than by repository (opt-in; see below)
 --busy                Hide repositories with nothing in the window
 --no-siblings         Only checkouts a workspace is sitting in
 --max-commits <N>     Commits listed per checkout before the rest are summarised

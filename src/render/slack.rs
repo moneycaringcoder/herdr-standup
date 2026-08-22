@@ -30,7 +30,7 @@ use crate::model::Severity;
 const BULLET: char = '\u{2022}'; // •
 const SUB_BULLET: char = '\u{25e6}'; // ◦
 
-pub fn slack(digest: &Digest, config: &Config) -> String {
+pub fn slack(digest: &Digest, config: &Config, grouping: Option<&Grouping>) -> String {
     let mut out = String::new();
     let window = &digest.window;
 
@@ -45,47 +45,82 @@ pub fn slack(digest: &Digest, config: &Config) -> String {
         out.push_str(&esc(&note));
         out.push('\n');
     }
+    if let Some(grouping) = grouping {
+        out.push_str(&esc(&grouping.caveat()));
+        out.push('\n');
+    }
     out.push('\n');
 
-    let repos = sorted_repos(digest);
-    let busy: Vec<&RepoDigest> = repos
-        .iter()
-        .copied()
-        .filter(|repo| repo.activity() != Activity::Quiet)
-        .collect();
-    let quiet: Vec<&RepoDigest> = repos
-        .iter()
-        .copied()
-        .filter(|repo| repo.activity() == Activity::Quiet)
-        .collect();
+    let sections = sections(digest, grouping);
+    let total: usize = sections.iter().map(|section| section.repos.len()).sum();
+    let busy_anywhere = sections.iter().any(|section| {
+        section
+            .repos
+            .iter()
+            .any(|r| r.activity() != Activity::Quiet)
+    });
 
-    if repos.is_empty() {
+    if total == 0 {
         out.push_str("No repositories were found in this session.\n");
-    } else if busy.is_empty() {
+    } else if !busy_anywhere {
         out.push_str(&format!(
             "Nothing landed in this window, across {}.\n",
-            quantity(repos.len(), "repository", "repositories")
+            quantity(total, "repository", "repositories")
         ));
     } else {
         out.push_str(&format!(
             "{} across {}.\n\n",
             esc(&stats(digest.total_commits(), digest.total_churn())),
-            quantity(repos.len(), "repository", "repositories")
+            quantity(digest.repos.len(), "repository", "repositories")
         ));
         let with_date = dates_needed(digest);
         let list_commits = lists_commits(&digest.window);
-        for repo in &busy {
-            repo_lines(&mut out, repo, config, with_date, list_commits);
+        for section in &sections {
+            if let Some(heading) = &section.heading {
+                out.push_str(&format!(
+                    "\n*{}*{}\n",
+                    esc(heading),
+                    section
+                        .stats
+                        .as_deref()
+                        .map(|stats| format!(" \u{2014} {}", esc(stats)))
+                        .unwrap_or_default()
+                ));
+            }
+            for repo in section.busy() {
+                repo_lines(&mut out, repo, config, with_date, list_commits);
+            }
+            // Under its own heading when there is one: with a grouping, one
+            // repository can be busy in one group and quiet in another, and a
+            // single trailing list would contradict a busy block above it.
+            if section.heading.is_some() {
+                quiet_line(&mut out, section.quiet().map(|repo| esc(&repo.name)));
+            }
         }
     }
 
-    if !quiet.is_empty() {
-        let names: Vec<String> = quiet.iter().map(|repo| esc(&repo.name)).collect();
-        out.push_str(&format!("\nQuiet: {}.\n", names.join(", ")));
+    if sections.iter().all(|section| section.heading.is_none()) {
+        quiet_line(
+            &mut out,
+            sections
+                .iter()
+                .flat_map(|section| section.quiet())
+                .map(|repo| esc(&repo.name)),
+        );
     }
 
     notes(&mut out, digest);
     out
+}
+
+/// The one place a list of quiet repository names is formatted, so a section's
+/// list and the whole digest's cannot drift apart.
+fn quiet_line(out: &mut String, names: impl Iterator<Item = String>) {
+    let names: Vec<String> = names.collect();
+    if names.is_empty() {
+        return;
+    }
+    out.push_str(&format!("\nQuiet: {}.\n", names.join(", ")));
 }
 
 /// The comparison, in mrkdwn.

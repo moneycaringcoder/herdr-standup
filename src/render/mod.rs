@@ -33,6 +33,9 @@ pub use markdown::markdown;
 pub use slack::slack;
 pub use text::text;
 
+use crate::by_agent::{self, Grouping};
+use crate::config::Ignored;
+
 use std::path::Path;
 
 use crate::config::{Config, Format};
@@ -69,14 +72,92 @@ const MIDDOT: char = '\u{b7}'; // ·
 
 /// Renders in whichever format the config asks for.
 pub fn render(digest: &Digest, config: &Config) -> Result<String> {
+    // Computed once, here, rather than inside each format: the grouping owns the
+    // filtered repositories every renderer then borrows, and building it four
+    // times would be four chances for them to disagree.
+    let grouping = config
+        .by_agent
+        .then(|| by_agent::group(digest, &Ignored::new(config.ignore.clone())));
+    let grouping = grouping.as_ref();
+
     match config.format {
-        Format::Text => Ok(text(digest, config)),
-        Format::Markdown => Ok(markdown(digest, config)),
-        Format::Slack => Ok(slack(digest, config)),
-        Format::Html => Ok(html(digest, config)),
+        Format::Text => Ok(text::text(digest, config, grouping)),
+        Format::Markdown => Ok(markdown::markdown(digest, config, grouping)),
+        Format::Slack => Ok(slack::slack(digest, config, grouping)),
+        Format::Html => Ok(html::html(digest, config, grouping)),
         Format::Json => json(digest),
     }
 }
+
+/// One block of repositories, and the heading above it.
+///
+/// The default digest is a single section with no heading: grouped by
+/// repository, which is the deliberate choice. `--by-agent` produces one section
+/// per agent, which is why this exists at all — every format walks sections so
+/// the grouping is decided once rather than four times.
+pub(crate) struct Section<'a> {
+    /// `None` for the ungrouped digest.
+    pub heading: Option<String>,
+    /// The group's own totals, for the heading line.
+    pub stats: Option<String>,
+    pub repos: Vec<&'a RepoDigest>,
+}
+
+impl<'a> Section<'a> {
+    pub fn busy(&self) -> impl Iterator<Item = &&'a RepoDigest> {
+        self.repos
+            .iter()
+            .filter(|repo| repo.activity() != Activity::Quiet)
+    }
+
+    pub fn quiet(&self) -> impl Iterator<Item = &&'a RepoDigest> {
+        self.repos
+            .iter()
+            .filter(|repo| repo.activity() == Activity::Quiet)
+    }
+}
+
+pub(crate) fn sections<'a>(digest: &'a Digest, grouping: Option<&'a Grouping>) -> Vec<Section<'a>> {
+    match grouping {
+        None => vec![Section {
+            heading: None,
+            stats: None,
+            repos: sorted_repos(digest),
+        }],
+        Some(grouping) => grouping
+            .groups
+            .iter()
+            .map(|group| Section {
+                // The same credit the ungrouped digest gives an agent, program
+                // suffix and all, so a heading and a checkout's `agents:` line
+                // cannot name one agent two ways.
+                heading: Some(
+                    group
+                        .agent
+                        .as_ref()
+                        .and_then(agent_label)
+                        .unwrap_or_else(|| group.label.clone()),
+                ),
+                stats: Some(repo_stats(group.commits, group.churn)),
+                repos: sorted_repo_refs(&group.repos),
+            })
+            .collect(),
+    }
+}
+
+/// [`sorted_repos`] over an owned list, which is what a grouping holds.
+pub(crate) fn sorted_repo_refs(repos: &[RepoDigest]) -> Vec<&RepoDigest> {
+    let mut repos: Vec<&RepoDigest> = repos.iter().collect();
+    repos.sort_by(|a, b| {
+        b.activity()
+            .cmp(&a.activity())
+            .then_with(|| b.commits.cmp(&a.commits))
+            .then_with(|| b.churn.insertions.cmp(&a.churn.insertions))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    repos
+}
+
 /// Machine-readable digest. Stable shape, versioned by
 /// [`SCHEMA_VERSION`](crate::model::SCHEMA_VERSION).
 pub fn json(digest: &Digest) -> Result<String> {
