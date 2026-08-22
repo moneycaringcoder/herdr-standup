@@ -245,6 +245,13 @@ impl Commit {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Churn {
     pub files: usize,
+    /// How many of `files` contributed no lines because they are generated or
+    /// vendored — a subset of `files`, never an addition to it.
+    ///
+    /// Carried so the exclusion can be *shown*. A line count quietly smaller
+    /// than the diff is the kind of number this plugin exists not to print;
+    /// a reader who sees `(1 generated)` can go and look.
+    pub excluded: usize,
     pub insertions: u64,
     pub deletions: u64,
 }
@@ -256,6 +263,7 @@ impl Churn {
 
     pub fn add(&mut self, other: Churn) {
         self.files += other.files;
+        self.excluded += other.excluded;
         self.insertions += other.insertions;
         self.deletions += other.deletions;
     }

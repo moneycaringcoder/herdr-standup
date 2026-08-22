@@ -95,7 +95,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::clock;
-use crate::config::DEFAULT_BRANCH_CANDIDATES;
+use crate::config::{Ignored, DEFAULT_BRANCH_CANDIDATES};
 use crate::model::{
     CheckoutReport, Churn, Commit, Dirty, Equivalence, Head, Landed, RepoKey, Stamp, Tracking,
     Unpushed, Window,
@@ -182,12 +182,14 @@ pub struct CheckoutId {
     pub is_linked_worktree: bool,
 }
 
-/// A git runner. Holds the resolved binary and the per-invocation timeout, so
-/// one wedged repository cannot stall the whole digest.
+/// A git runner. Holds the resolved binary, the per-invocation timeout — so one
+/// wedged repository cannot stall the whole digest — and the paths whose lines
+/// are not counted.
 #[derive(Debug, Clone)]
 pub struct Git {
     program: PathBuf,
     timeout: Duration,
+    ignored: Ignored,
 }
 
 /// One finished invocation. `code` is `None` when the child was killed by a
@@ -235,7 +237,16 @@ impl Git {
         Self {
             program: resolve_program(),
             timeout,
+            ignored: Ignored::default(),
         }
+    }
+
+    /// Replaces the paths whose lines are not counted. The default is
+    /// [`crate::config::DEFAULT_IGNORED_PATHS`]; `standup.rs` overrides it with
+    /// whatever the reader configured, including nothing at all.
+    pub fn ignoring(mut self, ignored: Ignored) -> Self {
+        self.ignored = ignored;
+        self
     }
 
     /// Path of the git binary in use. Rendered in error messages, because "git
@@ -630,7 +641,7 @@ impl Git {
             return (Vec::new(), Churn::default());
         }
 
-        parse_log(&out.stdout)
+        parse_log(&out.stdout, &self.ignored)
     }
 
     /// Uncommitted work. Counts come from `status --porcelain=v2`, line volume
@@ -1519,9 +1530,10 @@ impl Drop for ScratchIndex {
 /// first one carries the newline git puts between the header and the diff block.
 /// Only the first byte of a field is ever consulted, so a subject containing a
 /// record separator, a unit separator, a tab or a pipe cannot desynchronise it.
-fn parse_log(bytes: &[u8]) -> (Vec<Commit>, Churn) {
+fn parse_log(bytes: &[u8], ignored: &Ignored) -> (Vec<Commit>, Churn) {
     let mut commits: Vec<Commit> = Vec::new();
     let mut files_seen: Vec<String> = Vec::new();
+    let mut excluded_seen: Vec<String> = Vec::new();
     let mut churn = Churn::default();
 
     for field in bytes.split(|byte| *byte == 0) {
@@ -1551,13 +1563,20 @@ fn parse_log(bytes: &[u8]) -> (Vec<Commit>, Churn) {
         let Some((added, deleted, path)) = parse_numstat(line) else {
             continue;
         };
-        // A binary file prints `-` for both counts. It is still a file the
-        // commit touched, so it counts toward the file total and adds nothing to
-        // the lines.
-        commit.insertions += added.unwrap_or(0);
-        commit.deletions += deleted.unwrap_or(0);
-        churn.insertions += added.unwrap_or(0);
-        churn.deletions += deleted.unwrap_or(0);
+        // A binary file prints `-` for both counts, and a generated or vendored
+        // path is treated exactly the same way: it is still a file the commit
+        // touched, so it counts toward the file total and adds nothing to the
+        // lines. Lines are the number that means "effort", and a regenerated
+        // lockfile is tens of thousands of them that nobody wrote.
+        let counts_lines = !ignored.matches(&path);
+        if counts_lines {
+            commit.insertions += added.unwrap_or(0);
+            commit.deletions += deleted.unwrap_or(0);
+            churn.insertions += added.unwrap_or(0);
+            churn.deletions += deleted.unwrap_or(0);
+        } else if !excluded_seen.contains(&path) {
+            excluded_seen.push(path.clone());
+        }
         if !files_seen.contains(&path) {
             files_seen.push(path.clone());
         }
@@ -1566,6 +1585,7 @@ fn parse_log(bytes: &[u8]) -> (Vec<Commit>, Churn) {
 
     // The union, not the sum: a file edited in five commits is one file changed.
     churn.files = files_seen.len();
+    churn.excluded = excluded_seen.len();
     (commits, churn)
 }
 
@@ -1776,7 +1796,7 @@ mod tests {
         stream.extend_from_slice("bbbb\u{1f}aaaa\u{1f}agent\u{1f}1700000100\u{1f}next".as_bytes());
         stream.push(0);
 
-        let (commits, churn) = parse_log(&stream);
+        let (commits, churn) = parse_log(&stream, &Ignored::new(Vec::new()));
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].subject, "subject with \u{1e} and \u{1f} in it");
         assert_eq!(commits[0].files, vec!["a.txt".to_string()]);
@@ -1797,7 +1817,7 @@ mod tests {
             stream.extend_from_slice(b"\n1\t1\tshared.txt");
             stream.push(0);
         }
-        let (commits, churn) = parse_log(&stream);
+        let (commits, churn) = parse_log(&stream, &Ignored::new(Vec::new()));
         assert_eq!(commits.len(), 3);
         assert_eq!(churn.files, 1, "one file edited three times is one file");
         assert_eq!((churn.insertions, churn.deletions), (3, 3));

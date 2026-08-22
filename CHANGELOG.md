@@ -8,6 +8,25 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- **Generated and vendored paths no longer distort the line counts.** Lines added
+  and removed are a proxy for effort, and one regenerated lockfile destroys it:
+  a `pnpm-lock.yaml` churns tens of thousands of lines nobody wrote. Paths
+  matching the new `ignore` list are still counted as **files touched** — the
+  commit really did touch them, which is exactly how a binary file has always
+  been treated — and contribute nothing to the line totals. The exclusion is
+  shown rather than silently applied: the digest reads
+  `3 files (2 generated), +12 −0`, and `--json` carries `churn.excluded` beside
+  `churn.files` so a script knows the line totals are not the whole diff. The
+  default list is the obvious cases and nothing clever — dependency lockfiles,
+  `vendor/`, `node_modules/`, `third_party/`, `.yarn/`, `target/`, `dist/`,
+  `build/`, `.next/`, `.svelte-kit/` — with no `*.json`, no `*.lock` and no
+  "looks generated" heuristic, because a wrong exclusion is worse than a missing
+  one: it silently shrinks a real number. An `ignore` list in the config file
+  replaces the default rather than adding to it, so the defaults can be both
+  extended and got rid of, and `"ignore": []` gives back the raw diff. Three
+  pattern shapes, documented in the README: a bare name matches the basename at
+  any depth, a trailing slash matches a directory at any depth, and `*` never
+  crosses a `/`.
 - **Committed but unpushed work is its own state.** The digest already separated
   "the agent did nothing" from "the agent did a day of work and never committed
   it"; the state between them — committed here, on no remote, gone with the

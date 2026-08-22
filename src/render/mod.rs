@@ -174,6 +174,24 @@ pub(crate) fn delta(insertions: u64, deletions: u64) -> String {
     format!("+{insertions} {MINUS}{deletions}")
 }
 
+/// `23 files`, or `23 files (1 generated)` when some of them contributed no
+/// lines.
+///
+/// The parenthesis is the whole of "visible rather than silently applied". A
+/// line total quietly smaller than the diff is precisely the kind of number this
+/// plugin exists not to print, and a reader who sees the count can go and look
+/// at what was left out.
+///
+/// Excluded paths still count as **files**, because the commit really did touch
+/// them. That is the same treatment a binary file has always had.
+pub(crate) fn files_count(churn: Churn) -> String {
+    let files = quantity(churn.files, "file", "files");
+    match churn.excluded {
+        0 => files,
+        excluded => format!("{files} ({excluded} generated)"),
+    }
+}
+
 /// The stat block that sits at the right-hand end of a repository line:
 /// `7 commits  ·  23 files  +812 −140`.
 pub(crate) fn repo_stats(commits: usize, churn: Churn) -> String {
@@ -181,7 +199,7 @@ pub(crate) fn repo_stats(commits: usize, churn: Churn) -> String {
     if !churn.is_zero() {
         out.push_str(&format!(
             "  {MIDDOT}  {}  {}",
-            quantity(churn.files, "file", "files"),
+            files_count(churn),
             delta(churn.insertions, churn.deletions)
         ));
     }
@@ -368,7 +386,7 @@ pub(crate) fn checkout_clauses(report: &CheckoutReport, ref_max: usize) -> Vec<S
         if !report.churn.is_zero() {
             counted.push_str(&format!(
                 ", {}, {}",
-                quantity(report.churn.files, "file", "files"),
+                files_count(report.churn),
                 delta(report.churn.insertions, report.churn.deletions)
             ));
         }

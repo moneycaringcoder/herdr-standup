@@ -69,8 +69,8 @@ status, no CI, no generated prose. What the work *meant* is for whoever reads it
 ## What it tells you, per checkout
 
 - the commits in the window, with local times
-- files touched, lines added and removed
-- the branch, or that HEAD is detached, unborn, or pointing at a branch someone deleted underneath it
+- files touched, lines added and removed — with lockfiles, vendored trees and build output
+  excluded from the *line* counts, and the exclusion shown rather than silently applied
 - whether it has an upstream, and how far ahead or behind
 - **whether the work landed** on the repository's default branch — including under a new sha, which
   is all a squash or a rebase merge leaves behind
@@ -291,9 +291,38 @@ optional and a malformed file is ignored with a warning rather than being fatal.
   "format": "text",
   "max_commits": 10,
   "include_quiet": true,
-  "git_timeout_seconds": 20
+  "git_timeout_seconds": 20,
+  "ignore": ["Cargo.lock", "vendor/", "target/"]
 }
 ```
+
+### What `ignore` does, and what it does not
+
+Lines added and removed are a proxy for effort, and one regenerated lockfile destroys it. Paths
+matching `ignore` are **still counted as files touched** — the commit really did touch them — and
+contribute nothing to the line totals, which is exactly how a binary file has always been treated.
+The digest says so: `3 files (2 generated), +12 −0`.
+
+A list in the config file **replaces** the default rather than adding to it, so you can both extend
+the defaults and get rid of them. `"ignore": []` turns the exclusion off and gives you the raw diff
+numbers.
+
+Three pattern shapes and no others, so what it does fits in your head:
+
+| pattern | matches |
+|---|---|
+| `Cargo.lock` | any file with that **basename**, at any depth — one entry covers a nine-crate workspace |
+| `vendor/` | anything under a directory of that name, at any depth, so `web/node_modules/…` is covered |
+| `docs/api/*.json` | the whole path, where `*` stops at a `/` — a subtree is asked for with a trailing slash |
+
+The default list is the obvious cases and nothing clever: dependency lockfiles (`Cargo.lock`,
+`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb`, `composer.lock`,
+`Gemfile.lock`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `go.sum`, `flake.lock`, `pubspec.lock`,
+`Package.resolved`, `gradle.lockfile`), vendored trees (`vendor/`, `node_modules/`, `third_party/`,
+`.yarn/`) and build output (`target/`, `dist/`, `build/`, `.next/`, `.svelte-kit/`).
+
+Deliberately absent: anything that guesses. No `*.json`, no `*.lock`, no "looks generated"
+heuristic. A wrong exclusion is worse than a missing one, because it silently shrinks a real number.
 
 ## Four decisions you might disagree with
 

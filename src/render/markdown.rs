@@ -208,7 +208,7 @@ fn stats(commits: usize, churn: Churn) -> String {
     if !churn.is_zero() {
         out.push_str(&format!(
             ", {}, {}",
-            quantity(churn.files, "file", "files"),
+            files_count(churn),
             delta(churn.insertions, churn.deletions)
         ));
     }
