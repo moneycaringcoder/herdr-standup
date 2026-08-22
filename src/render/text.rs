@@ -75,6 +75,95 @@ pub fn text(digest: &Digest, config: &Config) -> String {
     out
 }
 
+/// The terminal comparison.
+///
+/// Laid out to be read top to bottom as a list of things that moved, not as a
+/// digest with numbers. There is no churn here and no commit list on purpose:
+/// "how much" is what a digest answers, and repeating it would turn this back
+/// into the longer digest it exists not to be.
+pub fn comparison(comparison: &Comparison) -> String {
+    let mut out = String::new();
+    // Two full stamps and a sentence do not fit in eighty columns, and a
+    // truncated header loses one of the two instants being compared — which is
+    // the one thing this report cannot be vague about.
+    line(
+        &mut out,
+        "standup \u{2014} what changed between two digests",
+    );
+    line(&mut out, &format!("  before  {}", comparison.before.full()));
+    line(&mut out, &format!("  after   {}", comparison.after.full()));
+    blank(&mut out);
+
+    if comparison.repos.is_empty() {
+        wrapped(
+            &mut out,
+            "  ",
+            "  ",
+            "Neither digest found a repository, so there is nothing to compare.",
+        );
+        return out;
+    }
+    if comparison.is_quiet() {
+        wrapped(
+            &mut out,
+            "  ",
+            "  ",
+            &format!(
+                "Nothing moved, across {}.",
+                quantity(comparison.repos.len(), "repository", "repositories")
+            ),
+        );
+        return out;
+    }
+
+    line(
+        &mut out,
+        &format!(
+            "  {} across {}",
+            quantity(comparison.total_commits(), "new commit", "new commits"),
+            quantity(comparison.repos.len(), "repository", "repositories")
+        ),
+    );
+
+    let unchanged: Vec<&str> = comparison
+        .repos
+        .iter()
+        .filter(|repo| {
+            repo.checkouts
+                .iter()
+                .all(|(_, movement)| movement.activity() == Activity::Quiet)
+        })
+        .map(|repo| repo.name.as_str())
+        .collect();
+
+    for repo in &comparison.repos {
+        if unchanged.contains(&repo.name.as_str()) {
+            continue;
+        }
+        blank(&mut out);
+        line(&mut out, &format!("  {}", repo.name));
+        for (path, movement) in &repo.checkouts {
+            if movement.activity() == Activity::Quiet {
+                continue;
+            }
+            let shown = shorten_path(std::path::Path::new(path), WIDTH.saturating_sub(10));
+            wrapped(&mut out, "    ", "      ", &shown);
+            marked(&mut out, movement.loud(), &movement.sentence());
+        }
+    }
+
+    if !unchanged.is_empty() {
+        blank(&mut out);
+        wrapped(
+            &mut out,
+            "  unchanged: ",
+            "             ",
+            &unchanged.join(", "),
+        );
+    }
+    out
+}
+
 /// The window, in the unambiguous form, and why it is this window.
 fn header(out: &mut String, digest: &Digest) {
     let window = &digest.window;

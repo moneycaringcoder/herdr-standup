@@ -2,7 +2,7 @@
 //!
 //! Verb dispatch only; every verb is implemented in the library crate.
 
-use standup::{clock, config, render, standup as digest, window, Result};
+use standup::{clock, compare, config, render, standup as digest, window, Result};
 
 const USAGE: &str = "\
 standup — a daily digest of what your agents actually did
@@ -27,6 +27,9 @@ Window:
   --weekly            This ISO week, Monday to now, aggregated rather than
                       listed. Sets its own window.
   --monthly           This calendar month, the 1st to now, likewise.
+  --diff <FILE>       Compare a digest saved by an earlier --json run with the
+                      one this run collects. Reads as a comparison — what is
+                      new, what finished, what stalled — not as a longer digest.
 
 Selection:
   --path <DIR>        Also report this checkout, whether or not herdr knows it
@@ -48,7 +51,14 @@ fn main() {
 }
 
 /// Options that take a value, and so must never be mistaken for the verb.
-const VALUED: [&str; 5] = ["--since", "--until", "--path", "--format", "--max-commits"];
+const VALUED: [&str; 6] = [
+    "--since",
+    "--until",
+    "--path",
+    "--format",
+    "--max-commits",
+    "--diff",
+];
 
 /// Options that stand alone.
 const FLAGS: [&str; 8] = [
@@ -158,6 +168,17 @@ fn run(args: &[String]) -> Result<()> {
             config.record_run = config.format != config::Format::Json;
 
             let digest = digest::build(&config)?;
+
+            // A comparison is a different report, not a longer digest, so it
+            // gets its own renderer and never advances the marker: what changed
+            // between two digests is not "a digest a human read".
+            if let Some(earlier) = config::value_arg(args, "--diff")? {
+                let before = compare::read_digest(std::path::Path::new(&earlier))?;
+                let comparison = compare::compare(&before, &digest);
+                print!("{}", render::render_comparison(&comparison, &config)?);
+                return Ok(());
+            }
+
             print!("{}", render::render(&digest, &config)?);
 
             if config.record_run {

@@ -5,6 +5,7 @@
 //! behind `#[path]` includes, which break as soon as a module says `crate::`.
 
 pub mod clock;
+pub mod compare;
 pub mod config;
 pub mod git;
 pub mod herdr;

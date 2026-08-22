@@ -9,12 +9,6 @@ A feature that cannot meet that does not belong here.
 
 ## More ways to read it
 
-### Diff two digests
-
-`--since-last` starts from the last digest a human read. The natural next question
-is what changed between two of them, which is a different report from a longer
-window.
-
 ### Slack and HTML output
 
 Markdown for pasting and JSON for scripting already exist. Slack's mrkdwn is not

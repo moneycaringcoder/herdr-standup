@@ -8,6 +8,34 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- `--diff <FILE>`: compares a digest saved by an earlier `--json` run with the
+  one this run collects, and reads as a **comparison rather than a longer
+  digest**. No churn, no line volume, no commit list — those are what a digest
+  answers. This answers what moved: `3 new since`, `landed since`, `pushed
+  since; 2 no longer only here`, `no new commits, still holding 2 unpushed and
+  uncommitted work`, `gone, and was holding 4 that were only there`, `new here`.
+
+  The stalled reading is the comparison's own finding and the reason it is worth
+  having: each digest on its own reports that state plainly, and neither says it
+  has not moved. Findings a reader has to act on are marked — `!` in the
+  terminal, bold in Markdown — and new work sorts above them, because burying
+  the commits somebody opened the report to see would be the same mistake as
+  burying a busy repository under quiet ones.
+
+  Checkouts are matched by **path**, the only identity a checkout keeps across
+  two runs, since branches get renamed and `HEAD` moves constantly. Commits are
+  matched by sha, so a rebase between the two runs reads as new work — which it
+  is, in the sense that matters here. Nothing about a comparison touches git: it
+  is a pure function of two digests, so it says exactly what they said and
+  cannot quietly consult the disk for a third answer.
+
+  The JSON is now an input as well as an output, so the model types read it back
+  as well as write it — one shape rather than a second one maintained beside it.
+  The saved digest's `schema` is checked before anything else and a version this
+  binary does not know is refused by name, because a comparison built on a
+  misread digest would be confidently wrong about what moved. `--diff` never
+  advances the `--since-last` marker: what changed between two digests is not "a
+  digest a human read".
 - `--weekly` and `--monthly`: the same data, aggregated rather than listed. The
   window options answer "what happened today"; these answer "what happened this
   month", which is the version somebody forwards. The commit lines go, the totals

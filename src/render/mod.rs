@@ -33,8 +33,9 @@ use std::path::Path;
 
 use crate::config::{Config, Format};
 use crate::model::{
-    Activity, AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Equivalence,
-    Head, Landed, Period, RepoDigest, Stamp, Tracking, Unpushed, Window, WindowSource,
+    Activity, AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Comparison, Digest, Dirty,
+    Equivalence, Head, Landed, Movement, Period, RepoDigest, Stamp, Tracking, Unpushed, Window,
+    WindowSource,
 };
 use crate::Result;
 
@@ -75,6 +76,19 @@ pub fn render(digest: &Digest, config: &Config) -> Result<String> {
 /// [`SCHEMA_VERSION`](crate::model::SCHEMA_VERSION).
 pub fn json(digest: &Digest) -> Result<String> {
     Ok(serde_json::to_string_pretty(digest)?)
+}
+
+/// Renders a comparison in whichever format the config asks for.
+///
+/// A separate entry point rather than a flag on [`render`], because the two
+/// answer different questions and sharing the path is how one starts reading
+/// like the other.
+pub fn render_comparison(comparison: &Comparison, config: &Config) -> Result<String> {
+    match config.format {
+        Format::Text => Ok(text::comparison(comparison)),
+        Format::Markdown => Ok(markdown::comparison(comparison)),
+        Format::Json => Ok(serde_json::to_string_pretty(comparison)?),
+    }
 }
 
 // ---------------------------------------------------------------------------

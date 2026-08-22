@@ -223,6 +223,61 @@ git log --since-as-filter=@1785542400 --date=format-local:%F --format=%cd --all 
 A rollup sets its own window, so `--since`, `--until` and `--since-last` are refused alongside it by
 name rather than one of them quietly winning.
 
+## Diffing two digests
+
+`--since-last` answers "what happened since I last looked". This answers the question after it:
+
+```sh
+standup --json > monday.json
+# ...on Tuesday
+standup --diff monday.json
+```
+
+A comparison is **not a longer digest**, and does not read like one. There is no churn here, no line
+volume and no commit list — those are what a digest answers. This answers what *moved*:
+
+```
+standup — what changed between two digests
+  before  2026-08-22 12:17 UTC +0000
+  after   2026-08-22 12:41 UTC +0000
+
+  1 new commit across 3 repositories
+
+  herdr-standup
+    ~/repos/worktrees/standup-grind
+      1 new since
+
+  amadeo
+    ~
+      ! no new commits, still holding uncommitted work
+```
+
+Six things it can say about a checkout:
+
+| reading | what it means |
+|---|---|
+| `3 new since` | commits the earlier digest did not have, matched by sha |
+| `landed since` | reached the trunk — by containment or by patch, so a squash merge counts |
+| `pushed since; 2 no longer only here` | reached a remote, which is not the same as reaching the trunk |
+| `no new commits, still holding 2 unpushed and uncommitted work` | **stalled** |
+| `gone, and was holding 4 that were only there` | the checkout is no longer there, and it took work with it |
+| `new here` | not in the earlier digest at all |
+
+The stalled line is the comparison's own finding, and the reason this is worth having: each digest on
+its own reports that state plainly, and neither of them says it *has not moved*. Findings a reader
+has to act on are marked — `!` in the terminal, bold in Markdown.
+
+Checkouts are matched **by path**, which is the only identity a checkout keeps across two runs:
+branches get renamed and `HEAD` moves constantly. Commits are matched by sha, so a rebase between
+the two runs reads as new work — which it is, in the sense that matters: those objects were not in
+the earlier digest.
+
+Nothing about a comparison touches git. It is a pure function of the two digests, so it says exactly
+what they said and cannot quietly consult the disk for a third answer. The saved digest's `schema` is
+checked before anything else, and a shape this binary does not know is refused by name rather than
+deserialised into something that happens to fit. `--diff` never advances the `--since-last` marker:
+what changed between two digests is not "a digest a human read".
+
 ## How it works
 
 <img src="docs/img/pipeline.svg" alt="herdr's session snapshot and your checkouts feed a pipeline: candidate directories, identify, sibling worktrees, window resolution, per-checkout collection, grouping by repository, then the three renderers." width="100%">
@@ -312,6 +367,7 @@ standup --offline --path ~/repos/app --path ~/repos/api
 --since-last          Start from the last digest you read
 --weekly              This ISO week, Monday to now, aggregated
 --monthly             This calendar month, the 1st to now, aggregated
+--diff <FILE>         Compare a saved --json digest with the one this run collects
 
 --path <DIR>          Also report this checkout, whether or not herdr knows it
 --offline             Report only --path directories; never touch the socket
