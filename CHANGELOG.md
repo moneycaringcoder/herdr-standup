@@ -8,6 +8,29 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- The JSON shape is a written, enforced contract:
+  [`docs/json-schema.md`](docs/json-schema.md). It states what a consumer should
+  do — read `schema` first, ignore unknown fields, tolerate an unknown `kind`,
+  never parse the prose — and what counts as a breaking change: something
+  removed, renamed, retyped, or quietly given a new meaning. That last one is
+  what a schema version is really for, since nothing else can detect it.
+
+  `standup --diff --json` now carries `schema` too. It did not, which meant half
+  the output documented for scripting gave a consumer no way to refuse a shape it
+  did not know. One counter for both documents, because they come from one binary
+  and one model.
+
+  The promise is kept mechanically rather than by good intentions.
+  `tests/schema.rs` pins a literal inventory of every path and every `kind` both
+  documents can produce, built as a union over a digest that exercises every
+  variant, so a field renamed in passing fails the build with the rule in the
+  message. Bumping the version without the documentation and changelog to match
+  fails as well: a version nobody can look up is not a version.
+
+  The version stays at 1. It has never been published, so no consumer can be
+  holding an older shape — which is also why the additive changes above did not
+  move it. The rule applies from the first release onward.
+
 - Every timestamp in the JSON carries `offset_seconds`: the seconds east of UTC
   that its `local` string was rendered in. `zone` stays as it was — prose, for a
   header — and this is the same fact as a number, so a consumer no longer has to

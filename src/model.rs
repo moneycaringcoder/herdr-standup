@@ -725,6 +725,14 @@ impl Digest {
 /// thing the request says it must not do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comparison {
+    /// Schema version, the same counter the digest carries.
+    ///
+    /// One number for both documents rather than two: they are produced by one
+    /// binary from one model, a shape change usually touches both, and two
+    /// independently drifting versions would be a promise nobody could check. A
+    /// consumer refuses an unknown value here for exactly the reason it refuses
+    /// one on a digest.
+    pub schema: u32,
     /// When the earlier digest was generated.
     pub before: Stamp,
     /// When the later one was.

@@ -159,6 +159,24 @@ the top would be wrong for half of them. `epoch + offset_seconds` reproduces `lo
 `tests/json_time.rs` asserts under six zones — including the half-hour and three-quarter-hour ones —
 with the calendar arithmetic written a second time so the same bug cannot produce both sides.
 
+### The shape is a promise
+
+Both `--json` and `--diff --json` carry `schema`, and
+[docs/json-schema.md](docs/json-schema.md) is the contract: what a consumer should do, and what
+counts as a breaking change. The short version:
+
+- **Read `schema` first** and refuse a value you do not know. standup does the same — `--diff` rejects
+  a saved digest from another schema by name rather than guessing at it.
+- **Ignore unknown fields, and tolerate an unknown `kind`.** Both arrive without a version bump; a new
+  union arm is usually a *more precise* answer than the one it would have given before.
+- **A version bump means something removed, renamed, retyped, or quietly given a new meaning.** That
+  last one is what a schema version is really for, because nothing else can detect it.
+
+That promise is kept mechanically rather than by good intentions. `tests/schema.rs` holds a literal
+inventory of every path and every `kind` both documents can produce, so a field renamed in passing
+fails the build with the rule in the failure message, and a version bumped in code without the
+documentation and changelog to match fails too.
+
 ## Windows
 
 `--since` accepts anything git accepts, and the default is local midnight:
