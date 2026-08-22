@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::clock;
-use crate::config::Config;
+use crate::config::{Config, Ignored};
 use crate::git::{CheckoutId, Git};
 use crate::herdr::Herdr;
 use crate::model::{
@@ -38,7 +38,8 @@ use crate::Result;
 /// `digest.notes`; only a failure that would make the whole report a lie is
 /// returned as an error.
 pub fn build(config: &Config) -> Result<Digest> {
-    let git = Git::new(config.git_timeout);
+    let ignored = Ignored::new(config.ignore.clone());
+    let git = Git::new(config.git_timeout).ignoring(ignored.clone());
     let mut notes: Vec<Note> = Vec::new();
 
     let workspaces = collect_workspaces(config, &mut notes)?;
@@ -136,7 +137,7 @@ pub fn build(config: &Config) -> Result<Digest> {
 
     let mut repos: Vec<RepoDigest> = by_repo.into_values().collect();
     for repo in &mut repos {
-        rollup(repo);
+        rollup(repo, &ignored);
         repo.checkouts.sort_by(|a, b| {
             b.report
                 .activity()
@@ -352,7 +353,12 @@ fn merge_checkout(
 /// checkouts. Two worktrees of one repository share history, so a commit
 /// visible from both must be counted once — summing per-checkout totals would
 /// silently double the day's output.
-fn rollup(repo: &mut RepoDigest) {
+///
+/// The excluded count is recomputed here rather than summed, for the same
+/// reason: it is the size of a union, and it is a pure function of the path, so
+/// testing each path in the union is both cheaper and correct where adding up
+/// per-checkout counts would double a lockfile touched in two worktrees.
+fn rollup(repo: &mut RepoDigest, ignored: &Ignored) {
     let mut seen_commits: Vec<&str> = Vec::new();
     let mut files: Vec<&str> = Vec::new();
     let mut churn = Churn::default();
@@ -372,6 +378,7 @@ fn rollup(repo: &mut RepoDigest) {
         }
     }
     churn.files = files.len();
+    churn.excluded = files.iter().filter(|file| ignored.matches(file)).count();
     repo.commits = seen_commits.len();
     repo.churn = churn;
 }

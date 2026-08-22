@@ -436,6 +436,24 @@ impl Fixture {
         self.commit_all_at(&self.repo, T_IN2, "skew: in window, newest");
     }
 
+    /// A commit that touches a hand-written file, a lockfile and a vendored
+    /// tree, with the generated lines deliberately dwarfing the real ones — the
+    /// shape that makes a line count meaningless.
+    ///
+    /// Returns `(real lines, generated lines)` so a test can assert against the
+    /// numbers the fixture actually wrote rather than a copy of them.
+    pub fn generated_and_vendored_commit(&self, epoch: i64) -> (u64, u64) {
+        self.write(&self.repo, "src/main.rs", &lines(12, None));
+        self.write(&self.repo, "Cargo.lock", &lines(400, None));
+        self.write(
+            &self.repo,
+            "web/node_modules/react/index.js",
+            &lines(600, None),
+        );
+        self.commit_all_at(&self.repo, epoch, "add a dependency and regenerate");
+        (12, 1000)
+    }
+
     // -----------------------------------------------------------------------
     // Remotes, upstreams and landing
     // -----------------------------------------------------------------------

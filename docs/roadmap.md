@@ -7,14 +7,6 @@ The standard everything below is held to is the one in the README: **every numbe
 is one git command away from being checked by hand, and none of them is a guess.**
 A feature that cannot meet that does not belong here.
 
-## Correctness
-
-### Exclude generated and vendored paths from line counts
-
-Lines added and removed are a proxy for effort, and a regenerated lockfile or a
-vendored directory destroys it. An ignore list, defaulting to the obvious cases,
-would make the number mean what readers already assume it means.
-
 ## Windows and coverage
 
 ### Cover the paths the first cross-platform run exposed

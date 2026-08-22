@@ -184,6 +184,13 @@ git -C <wt> --no-optional-locks log -z --since-as-filter=<since> [--min-age=<unt
   rename prints a three-field form that a naive parser mangles.
 - A **binary** file prints `-\t-\t<path>`: count the file, add nothing to the
   line totals.
+- A **generated or vendored** path is treated exactly like a binary one: counted
+  as a file, contributing no lines. Lines are the number that means "effort",
+  and a regenerated lockfile is tens of thousands of them nobody wrote. Which
+  paths those are is configuration rather than plumbing — see `Ignored` in
+  `src/config.rs` and the `ignore` key in the README — and the count of them is
+  carried on `Churn::excluded` so the digest can say `3 files (2 generated)`
+  rather than printing a line total quietly smaller than the diff.
 - A **merge** commit prints no numstat at all. It is detected from the parent
   count in `%P`, counts toward the commit total, and contributes nothing to
   churn — a merge introduces no new work.

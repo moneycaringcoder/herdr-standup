@@ -19,7 +19,7 @@
 
 use std::path::PathBuf;
 
-use standup::config::Config;
+use standup::config::{Config, Ignored};
 use standup::model::{
     AgentRef, CheckoutDigest, CheckoutReport, Churn, Commit, Digest, Dirty, Equivalence, Head,
     Landed, Note, RepoDigest, RepoKey, Stamp, Tracking, Unpushed, Window, WindowSource,
@@ -222,6 +222,13 @@ fn repo(name: &str, checkouts: Vec<CheckoutDigest>) -> RepoDigest {
         }
     }
     churn.files = files.len();
+    // The same rule `standup::rollup` applies: the excluded count is recomputed
+    // over the union rather than summed, so a lockfile touched in two worktrees
+    // is one excluded file.
+    churn.excluded = files
+        .iter()
+        .filter(|file| Ignored::default().matches(file))
+        .count();
     RepoDigest {
         repo_key: RepoKey(format!("/repos/{name}/.git")),
         name: name.to_string(),
@@ -919,6 +926,70 @@ fn an_uncountable_unpushed_state_is_reported_rather_than_hidden() {
         !flat.contains("quiet"),
         "a checkout whose numbers are incomplete must not be summarised away:\n{flat}"
     );
+}
+
+/// "Visible in the output rather than silently applied" is the whole of it. A
+/// line total quietly smaller than the diff is the kind of number this plugin
+/// exists not to print, so the count of paths that contributed nothing is shown
+/// beside the file count — in every format, including the one a script reads.
+#[test]
+fn excluded_paths_are_counted_in_the_open() {
+    let mut report = with_commits(
+        checkout("/repos/app/w", "feature/deps"),
+        vec![commit(
+            "aaaa0002aaaa0002aaaa0002aaaa0002aaaa0002",
+            "2026-08-15 08:00",
+            1_786_028_400,
+            "Add a dependency and regenerate",
+            &[
+                "src/main.rs",
+                "Cargo.lock",
+                "web/node_modules/react/index.js",
+            ],
+        )],
+    );
+    report.churn = Churn {
+        files: 3,
+        excluded: 2,
+        insertions: 12,
+        deletions: 0,
+    };
+    let digest = digest(vec![repo("app", vec![alone(report)])], Vec::new());
+
+    for rendered in [plain(&digest), md(&digest)] {
+        let flat = flatten(&rendered);
+        assert!(
+            flat.contains("3 files (2 generated)"),
+            "the exclusion has to be on the page:\n{rendered}"
+        );
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&json(&digest).unwrap()).unwrap();
+    assert_eq!(value["repos"][0]["churn"]["files"], 3);
+    assert_eq!(
+        value["repos"][0]["churn"]["excluded"], 2,
+        "a script reading the line totals needs to know they are not the whole diff"
+    );
+}
+
+/// And no parenthesis when there is nothing to put in it.
+#[test]
+fn a_checkout_with_nothing_excluded_says_nothing_about_it() {
+    let report = with_commits(
+        checkout("/repos/app/w", "feature/one"),
+        vec![commit(
+            "aaaa0003aaaa0003aaaa0003aaaa0003aaaa0003",
+            "2026-08-15 08:00",
+            1_786_028_400,
+            "Work",
+            &["a.rs"],
+        )],
+    );
+    let digest = digest(vec![repo("app", vec![alone(report)])], Vec::new());
+
+    let flat = flatten(&plain(&digest));
+    // Not the bare word: the header legitimately says "generated 09:12".
+    assert!(!flat.contains(" generated)"), "{flat}");
 }
 
 #[test]

@@ -11,6 +11,7 @@ mod fixtures;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use standup::config::Ignored;
 use standup::git::Git;
 use standup::model::{Activity, Equivalence, Head, Landed, Tracking, Unpushed};
 
@@ -338,6 +339,69 @@ fn a_repository_whose_work_is_all_older_than_the_window_is_quiet_not_broken() {
     assert!(report.churn.is_zero());
     assert!(report.dirty.is_clean());
     assert_eq!(report.activity(), Activity::Quiet);
+}
+
+// ---------------------------------------------------------------------------
+// Generated and vendored paths
+// ---------------------------------------------------------------------------
+
+/// Lines are a proxy for effort, and a regenerated lockfile destroys it. The
+/// files are still counted — the commit really did touch them, which is the same
+/// treatment a binary file has always had — and they contribute no lines.
+#[test]
+fn generated_and_vendored_paths_are_counted_as_files_and_not_as_lines() {
+    let fixture = Fixture::new("generated");
+    let (real, generated) = fixture.generated_and_vendored_commit(T_IN1);
+    let git = git();
+
+    let report = git.report(&id(&git, &fixture.repo), &window());
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_eq!(
+        report.churn.files, 3,
+        "every touched file is still a touched file"
+    );
+    assert_eq!(
+        report.churn.excluded, 2,
+        "the lockfile and the vendored tree"
+    );
+    assert_eq!(
+        (report.churn.insertions, report.churn.deletions),
+        (real, 0),
+        "only the hand-written lines; the {generated} generated ones are noise"
+    );
+}
+
+/// The list is configurable, and an empty one turns the exclusion off. Somebody
+/// who wants the raw diff numbers is entitled to ask for them.
+#[test]
+fn an_empty_ignore_list_counts_every_line() {
+    let fixture = Fixture::new("generated-off");
+    let (real, generated) = fixture.generated_and_vendored_commit(T_IN1);
+    let git = Git::new(TIMEOUT).ignoring(Ignored::new(Vec::new()));
+
+    let report = git.report(&id(&git, &fixture.repo), &window());
+    assert_eq!(report.churn.excluded, 0);
+    assert_eq!(
+        (report.churn.insertions, report.churn.deletions),
+        (real + generated, 0)
+    );
+}
+
+/// A pattern a reader added themselves is honoured, and one they did not is not.
+#[test]
+fn a_configured_pattern_replaces_the_defaults_rather_than_adding_to_them() {
+    let fixture = Fixture::new("generated-custom");
+    fixture.generated_and_vendored_commit(T_IN1);
+    // Only the vendored tree named, so the lockfile's lines come back.
+    let git = Git::new(TIMEOUT).ignoring(Ignored::new(vec!["node_modules/".to_string()]));
+
+    let report = git.report(&id(&git, &fixture.repo), &window());
+    assert_eq!(report.churn.excluded, 1, "the vendored tree only");
+    assert_eq!(
+        (report.churn.insertions, report.churn.deletions),
+        (412, 0),
+        "12 hand-written lines plus the 400-line lockfile"
+    );
 }
 
 // ---------------------------------------------------------------------------

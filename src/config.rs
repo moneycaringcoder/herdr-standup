@@ -24,6 +24,150 @@ pub const DEFAULT_BRANCH_CANDIDATES: &[&str] = &[
     "trunk",
 ];
 
+/// Paths whose *line* counts are noise, excluded by default.
+///
+/// Lines added and removed are a proxy for effort, and one regenerated lockfile
+/// destroys it: a `pnpm-lock.yaml` churns tens of thousands of lines that nobody
+/// wrote. These are still counted as **files touched** — the commit really did
+/// touch them — and contribute nothing to the line totals, which is exactly how
+/// this module already treats a binary file.
+///
+/// Chosen to be the obvious cases and nothing clever. Each entry is a
+/// [`Ignored`] pattern:
+///
+/// - dependency lockfiles, which are generated wholesale from a manifest a
+///   human did write;
+/// - vendored and installed dependency trees, which are somebody else's lines;
+/// - build output that people commit anyway.
+///
+/// Deliberately absent: anything that guesses. No `*.json`, no `*.lock`, no
+/// `generated` substring match, no minified-file heuristic. A wrong exclusion is
+/// worse than a missing one, because it silently shrinks a real number.
+pub const DEFAULT_IGNORED_PATHS: &[&str] = &[
+    // Lockfiles.
+    "Cargo.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+    "composer.lock",
+    "Gemfile.lock",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile.lock",
+    "go.sum",
+    "flake.lock",
+    "pubspec.lock",
+    "Package.resolved",
+    "gradle.lockfile",
+    // Vendored and installed dependency trees.
+    "vendor/",
+    "node_modules/",
+    "third_party/",
+    ".yarn/",
+    // Build output.
+    "target/",
+    "dist/",
+    "build/",
+    ".next/",
+    ".svelte-kit/",
+];
+
+/// Decides whether a repository-relative path's lines are counted.
+///
+/// A deliberately small matcher rather than a glob dependency, with three shapes
+/// and no others, so what it does can be held in the head:
+///
+/// | pattern | matches |
+/// |---|---|
+/// | `Cargo.lock` | any file with that **basename**, at any depth |
+/// | `vendor/` | anything under a directory of that name, at any depth |
+/// | `docs/api/*.json` | the whole path, where `*` stops at a `/` |
+///
+/// Basename matching for the bare form is what makes one `Cargo.lock` entry
+/// cover a workspace with nine crates. Segment matching for the trailing-slash
+/// form is what makes `node_modules/` cover `web/node_modules/…` as well as the
+/// root. `*` never crosses a separator, so `dist/*` is one level and not a
+/// subtree — the trailing-slash form is how a subtree is asked for.
+///
+/// An empty list matches nothing, which is how a reader turns the feature off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ignored {
+    patterns: Vec<String>,
+}
+
+impl Ignored {
+    pub fn new(patterns: Vec<String>) -> Self {
+        Self {
+            patterns: patterns
+                .into_iter()
+                .map(|pattern| pattern.trim().to_string())
+                .filter(|pattern| !pattern.is_empty())
+                .collect(),
+        }
+    }
+
+    /// Whether this path's lines are excluded from the totals.
+    pub fn matches(&self, path: &str) -> bool {
+        self.patterns
+            .iter()
+            .any(|pattern| Ignored::matches_one(pattern, path))
+    }
+
+    pub fn patterns(&self) -> &[String] {
+        &self.patterns
+    }
+
+    fn matches_one(pattern: &str, path: &str) -> bool {
+        if let Some(directory) = pattern.strip_suffix('/') {
+            // Every segment except the last, so a *file* called `dist` is not
+            // mistaken for a directory of build output.
+            let Some((parents, _file)) = path.rsplit_once('/') else {
+                return false;
+            };
+            return parents.split('/').any(|segment| segment == directory);
+        }
+        if pattern.contains('/') {
+            return glob_segment(pattern, path);
+        }
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        glob_segment(pattern, basename)
+    }
+}
+
+impl Default for Ignored {
+    fn default() -> Self {
+        Ignored::new(
+            DEFAULT_IGNORED_PATHS
+                .iter()
+                .map(|pattern| pattern.to_string())
+                .collect(),
+        )
+    }
+}
+
+/// `*` matches any run of characters other than `/`; everything else is literal.
+///
+/// Written out rather than pulled in, because the whole grammar is one
+/// wildcard and a dependency would be more code than this in the lockfile
+/// alone — a lockfile this feature exists to stop counting.
+fn glob_segment(pattern: &str, text: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == text,
+        Some((prefix, rest)) => {
+            if !text.starts_with(prefix) {
+                return false;
+            }
+            let remainder = &text[prefix.len()..];
+            // The wildcard stops at a separator, so a pattern for one directory
+            // level never silently becomes a whole subtree.
+            let stop = remainder.find('/').unwrap_or(remainder.len());
+            (0..=stop).any(|split| glob_segment(rest, &remainder[split..]))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Window start, as a git approxidate string.
@@ -63,6 +207,11 @@ pub struct Config {
     /// Report the digest for these paths only, skipping the herdr socket
     /// entirely.
     pub offline: bool,
+    /// Paths whose lines are not counted. Defaults to
+    /// [`DEFAULT_IGNORED_PATHS`]; a list in the config file replaces it
+    /// wholesale rather than adding to it, so a reader can both extend the
+    /// defaults and get rid of them.
+    pub ignore: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +249,10 @@ impl Default for Config {
             git_timeout: Duration::from_secs(20),
             extra_paths: Vec::new(),
             offline: false,
+            ignore: DEFAULT_IGNORED_PATHS
+                .iter()
+                .map(|pattern| pattern.to_string())
+                .collect(),
         }
     }
 }
@@ -160,6 +313,7 @@ struct FileConfig {
     max_commits: Option<usize>,
     include_quiet: Option<bool>,
     git_timeout_seconds: Option<u64>,
+    ignore: Option<Vec<String>>,
 }
 
 pub fn config_file() -> PathBuf {
@@ -206,6 +360,11 @@ fn load_file() -> Config {
     }
     if let Some(seconds) = file.git_timeout_seconds.filter(|s| *s > 0) {
         config.git_timeout = Duration::from_secs(seconds);
+    }
+    // An empty list is meaningful and is honoured: it turns the exclusion off,
+    // which somebody who wants the raw numbers is entitled to ask for.
+    if let Some(ignore) = file.ignore {
+        config.ignore = ignore;
     }
     config
 }
@@ -311,6 +470,98 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// One `Cargo.lock` entry has to cover a workspace with nine crates, which
+    /// is why the bare form matches the basename at any depth.
+    #[test]
+    fn a_bare_pattern_matches_the_basename_at_any_depth() {
+        let ignored = Ignored::new(vec!["Cargo.lock".to_string()]);
+        assert!(ignored.matches("Cargo.lock"));
+        assert!(ignored.matches("crates/core/Cargo.lock"));
+        assert!(!ignored.matches("Cargo.toml"));
+        assert!(
+            !ignored.matches("Cargo.lock.bak"),
+            "the basename has to match, not merely start with the pattern"
+        );
+    }
+
+    /// `node_modules/` has to cover `web/node_modules/…` as well as the root,
+    /// because that is where it actually turns up.
+    #[test]
+    fn a_trailing_slash_matches_a_directory_at_any_depth() {
+        let ignored = Ignored::new(vec!["node_modules/".to_string()]);
+        assert!(ignored.matches("node_modules/react/index.js"));
+        assert!(ignored.matches("web/node_modules/react/index.js"));
+        assert!(!ignored.matches("src/node_modules.md"));
+    }
+
+    /// A *file* named like a build directory is not build output. The last
+    /// segment is a filename and is never treated as a directory.
+    #[test]
+    fn a_file_named_like_a_directory_is_not_excluded() {
+        let ignored = Ignored::new(vec!["dist/".to_string()]);
+        assert!(ignored.matches("dist/app.js"));
+        assert!(!ignored.matches("dist"));
+        assert!(!ignored.matches("scripts/dist"));
+    }
+
+    #[test]
+    fn a_wildcard_never_crosses_a_separator() {
+        let ignored = Ignored::new(vec!["docs/*.json".to_string()]);
+        assert!(ignored.matches("docs/api.json"));
+        assert!(
+            !ignored.matches("docs/v2/api.json"),
+            "`*` is one level; a subtree is asked for with a trailing slash"
+        );
+        assert!(!ignored.matches("api.json"));
+    }
+
+    #[test]
+    fn a_bare_wildcard_matches_the_basename_only() {
+        let ignored = Ignored::new(vec!["*.min.js".to_string()]);
+        assert!(ignored.matches("static/app.min.js"));
+        assert!(!ignored.matches("static/app.js"));
+    }
+
+    /// Turning the exclusion off has to be possible, and an empty list is how.
+    #[test]
+    fn an_empty_list_matches_nothing() {
+        let ignored = Ignored::new(Vec::new());
+        assert!(!ignored.matches("Cargo.lock"));
+        assert!(!ignored.matches("node_modules/react/index.js"));
+    }
+
+    /// The defaults are the point of the feature, so they are pinned rather than
+    /// assumed: these are the paths a reader will actually meet.
+    #[test]
+    fn the_default_list_covers_the_obvious_cases() {
+        let ignored = Ignored::default();
+        for path in [
+            "Cargo.lock",
+            "crates/core/Cargo.lock",
+            "pnpm-lock.yaml",
+            "web/package-lock.json",
+            "go.sum",
+            "flake.lock",
+            "vendor/github.com/pkg/errors/errors.go",
+            "web/node_modules/react/index.js",
+            "target/debug/build.rs",
+            "dist/app.js",
+            ".next/static/chunk.js",
+        ] {
+            assert!(ignored.matches(path), "{path} should not be counted");
+        }
+        for path in [
+            "Cargo.toml",
+            "src/main.rs",
+            "package.json",
+            "docs/target.md",
+            "src/dist.rs",
+            "vendor.rs",
+        ] {
+            assert!(!ignored.matches(path), "{path} is somebody's work");
+        }
     }
 
     #[test]
