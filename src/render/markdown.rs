@@ -86,6 +86,62 @@ pub fn markdown(digest: &Digest, config: &Config) -> String {
     out
 }
 
+/// The same comparison as Markdown, for pasting where the digest goes.
+pub fn comparison(comparison: &Comparison) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "**standup** \u{2014} what changed between **{}** and **{}**\n\n",
+        esc(&comparison.before.full()),
+        esc(&comparison.after.full())
+    ));
+
+    if comparison.repos.is_empty() {
+        out.push_str("Neither digest found a repository, so there is nothing to compare.\n");
+        return out;
+    }
+    if comparison.is_quiet() {
+        out.push_str(&format!(
+            "Nothing moved, across {}.\n",
+            quantity(comparison.repos.len(), "repository", "repositories")
+        ));
+        return out;
+    }
+
+    out.push_str(&format!(
+        "{} across {}.\n\n",
+        quantity(comparison.total_commits(), "new commit", "new commits"),
+        quantity(comparison.repos.len(), "repository", "repositories")
+    ));
+
+    let mut unchanged: Vec<String> = Vec::new();
+    for repo in &comparison.repos {
+        let moved: Vec<&(String, Movement)> = repo
+            .checkouts
+            .iter()
+            .filter(|(_, movement)| movement.activity() != Activity::Quiet)
+            .collect();
+        if moved.is_empty() {
+            unchanged.push(esc(&repo.name));
+            continue;
+        }
+        out.push_str(&format!("- **{}**\n", esc(&repo.name)));
+        for (path, movement) in moved {
+            let shown = shorten_path(std::path::Path::new(path), MD_PATH_COLUMNS);
+            let sentence = if movement.loud() {
+                format!("**{}**", esc(&movement.sentence()))
+            } else {
+                esc(&movement.sentence())
+            };
+            out.push_str(&format!("  - {} \u{2014} {sentence}\n", code(&shown)));
+        }
+    }
+
+    if !unchanged.is_empty() {
+        out.push_str(&format!("\nUnchanged: {}.\n", unchanged.join(", ")));
+    }
+    out
+}
+
 fn header(out: &mut String, digest: &Digest) {
     let window = &digest.window;
     let mut head = format!("**standup** \u{2014} since {}", esc(&window.since.full()));

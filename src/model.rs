@@ -22,12 +22,12 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Canonical identity of a repository: its absolute `--git-common-dir`, shared
 /// by every linked worktree of the same repo. Never the directory name, never
 /// `--git-dir` (which is per-worktree).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RepoKey(pub String);
 
 impl RepoKey {
@@ -47,7 +47,7 @@ impl RepoKey {
 /// user is shown, and `zone` names the zone `local` is expressed in. A renderer
 /// can never accidentally print a UTC instant as if it were local, because it
 /// has no way to format `epoch` itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {
     /// Seconds since the Unix epoch.
     pub epoch: i64,
@@ -67,7 +67,7 @@ impl Stamp {
 /// How the reporting window was chosen. Rendered, because "you asked for
 /// today" and "this is the first run so I fell back to today" are different
 /// answers to "why is this empty".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WindowSource {
     /// The built-in default: local midnight today.
@@ -90,7 +90,7 @@ pub enum WindowSource {
 /// question people forward to each other, and "the last thirty days" is not the
 /// same question. The boundary is computed from `localtime_r` and printed as an
 /// absolute instant, so it can be checked rather than trusted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Period {
     /// Monday to now. ISO 8601's week start, stated rather than taken from the
@@ -123,7 +123,7 @@ impl Period {
 /// "now" for input it cannot parse, with exit status 0, so a typo'd window would
 /// otherwise produce an empty digest indistinguishable from a quiet day. See
 /// `window::resolve`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
     pub since: Stamp,
     /// `None` means "up to now", which is the normal case.
@@ -145,7 +145,7 @@ pub struct Window {
 /// ones alone would have omitted two thirds of the day's work. So the candidate
 /// paths are the union of `workspace.worktree.checkout_path` and every distinct
 /// pane `cwd`, and git decides which of them are checkouts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRef {
     pub workspace_id: String,
     /// The workspace label the user sees in the sidebar.
@@ -168,7 +168,7 @@ pub struct WorkspaceRef {
 /// JSON output**. The name is what makes a digest readable ("shear-classifier
 /// landed three commits"); the session id is a pointer for follow-up that has no
 /// business being pasted into a team channel. Never any transcript content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRef {
     /// The user's label for the agent, e.g. `shear-classifier`.
     pub name: Option<String>,
@@ -210,7 +210,7 @@ impl AgentRef {
 // ---------------------------------------------------------------------------
 
 /// What HEAD is, which decides how much of the rest is even meaningful.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Head {
     /// On a branch, with a commit.
@@ -246,7 +246,7 @@ impl Head {
 }
 
 /// One commit inside the window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Commit {
     /// Full 40-hex object id. Renderers abbreviate; the data keeps it whole.
     pub oid: String,
@@ -277,7 +277,7 @@ impl Commit {
 /// Aggregate change volume. `files` is the size of the *union* of touched
 /// paths, not the sum of per-commit file counts, so a file edited in five
 /// commits counts once.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Churn {
     pub files: usize,
     /// How many of `files` contributed no lines because they are generated or
@@ -311,7 +311,7 @@ impl Churn {
 /// work and never committed it", which is the single most useful thing a
 /// standup digest can tell you. Reported as a present-tense fact, separately
 /// from the window.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dirty {
     pub tracked_changed: usize,
     pub untracked: usize,
@@ -327,7 +327,7 @@ impl Dirty {
 }
 
 /// Upstream tracking state for the checked-out branch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Tracking {
     /// No branch (detached/unborn), so tracking is not a question that applies.
@@ -365,7 +365,7 @@ pub enum Tracking {
 /// since two commits with the same diff are indistinguishable by patch id, so
 /// the digest says which of the two it holds rather than flattening them into
 /// one word.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Landed {
     /// This checkout *is* the default branch.
@@ -387,7 +387,7 @@ pub enum Landed {
 /// Both carry enough to re-run by hand, because the standard for every number
 /// in this digest is that one git command reproduces it, and a verdict this
 /// indirect owes the reader that command more than the exact ones do.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Equivalence {
     /// Every commit on the branch has a patch-id twin on the default branch:
@@ -406,7 +406,7 @@ pub enum Equivalence {
 /// How much a checkout has to say. Ordering matters: renderers sort busiest
 /// first, and `Broken` sorts to the top of everything so a failure is never
 /// buried under a page of quiet workspaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activity {
     /// Nothing in the window, nothing uncommitted, and nothing that exists only
@@ -427,7 +427,7 @@ pub enum Activity {
 
 /// Everything known about one checkout over the window. Built by `git.rs` from
 /// a path; the herdr side is joined on afterwards.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutReport {
     /// The checkout root, as git resolves it (`--show-toplevel`), not the pane
     /// cwd that led us there.
@@ -462,7 +462,7 @@ pub struct CheckoutReport {
 /// nowhere for that work to have been pushed to, so "unpushed" is not a state it
 /// can be in, and reporting every commit of a local-only repository as at risk
 /// would bury the case this exists to surface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Unpushed {
     /// No remote is configured, so there is nowhere this could have been pushed.
@@ -529,7 +529,7 @@ impl CheckoutReport {
 // ---------------------------------------------------------------------------
 
 /// One checkout, with the herdr workspaces that were sitting in it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutDigest {
     #[serde(flatten)]
     pub report: CheckoutReport,
@@ -564,7 +564,7 @@ pub struct CheckoutDigest {
 /// checkouts nested inside. Grouping by time would put two commits from one
 /// branch on opposite sides of an unrelated repo's commit, and "what came out of
 /// today" is answered per project. Time still orders everything inside a group.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoDigest {
     pub repo_key: RepoKey,
     /// Display name: the basename of the repo root.
@@ -598,13 +598,13 @@ impl RepoDigest {
 /// A problem that is not attributable to a single checkout — a workspace path
 /// that is not a repo, a snapshot field that did not parse, a git binary that
 /// could not be run. Always rendered.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Note {
     pub severity: Severity,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Info,
@@ -628,7 +628,7 @@ impl Note {
 }
 
 /// The whole report. Every renderer takes exactly this and adds nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Digest {
     /// Schema version for the JSON output, so a script can refuse a shape it
     /// does not know.
@@ -670,4 +670,69 @@ impl Digest {
             .filter(|r| r.activity() != Activity::Quiet)
             .collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Comparing two digests
+// ---------------------------------------------------------------------------
+
+/// Two digests, and what moved between them.
+///
+/// Deliberately not a `Digest`. A comparison answers a different question — not
+/// "what came out of this window" but "what changed since that one" — and giving
+/// it the same shape would make it render as a longer digest, which is the one
+/// thing the request says it must not do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Comparison {
+    /// When the earlier digest was generated.
+    pub before: Stamp,
+    /// When the later one was.
+    pub after: Stamp,
+    pub repos: Vec<RepoComparison>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoComparison {
+    pub repo_key: RepoKey,
+    pub name: String,
+    /// New commits since the earlier digest, across every checkout.
+    pub commits: usize,
+    /// Each checkout by path, and what happened to it. Path because it is the
+    /// only identity a checkout keeps across two runs: branches get renamed and
+    /// HEAD moves constantly.
+    pub checkouts: Vec<(String, Movement)>,
+}
+
+/// What happened to one checkout between two digests.
+///
+/// Named for what *moved*, not for how much happened. "Three commits" is what a
+/// digest says; "three new since, and landed" is what a comparison says, and the
+/// difference is the whole feature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Movement {
+    /// Not in the earlier digest at all: a new worktree, or a workspace that has
+    /// since been opened on it.
+    Appeared { commits: usize },
+    /// Commits the earlier digest did not have. Matched by oid, so a rebase
+    /// between the two runs reads as new work — which it is, in the sense that
+    /// matters: those objects were not there before.
+    Advanced { commits: usize, landed: bool },
+    /// No new commits, but the work reached the trunk. Either reading counts,
+    /// containment or a matching patch, because a squash merge is how most of it
+    /// arrives.
+    Landed,
+    /// No new commits, and the at-risk count fell to nothing. Distinct from
+    /// landing, which is about the trunk rather than about a remote.
+    Pushed { was_holding: u64 },
+    /// No new commits, and still holding something that would be lost with the
+    /// directory. The comparison's own finding: each digest on its own reports
+    /// the state plainly, and neither says it has not moved.
+    Stalled { unpushed: u64, uncommitted: bool },
+    /// In the earlier digest and not the later one. `was_holding` is what the
+    /// earlier digest said was only there, which is what a removed worktree
+    /// takes with it.
+    Gone { was_holding: u64 },
+    /// Present in both, and nothing moved.
+    Unchanged,
 }
