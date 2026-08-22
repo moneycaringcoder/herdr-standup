@@ -10,7 +10,7 @@ don't take questions on a pull request as resistance; they are how the
 maintainer stays confident in code that runs against other people's
 repositories.
 
-## The two rules that matter
+## The rules that matter
 
 **standup is read-only against user repositories.** It runs on machines full of
 in-flight, uncommitted, unpushed agent work. A bug that loses someone's work is
@@ -39,6 +39,15 @@ and answers "now"; a digest built on that is empty, correctly formatted, and a
 lie. Every degradation in this codebase is therefore either a loud error or a
 rendered note — never a fallback that resembles a normal empty result. Keep it
 that way.
+
+**The JSON shape is an interface.** `--json` and `--diff --json` are documented
+for scripting, so their shape is somebody else's dependency.
+`docs/json-schema.md` says what counts as a breaking change and what does not,
+and `tests/schema.rs` pins every path and every `kind` both documents can
+produce. If that test fails, you changed the interface — deliberately or in
+passing — and the failure message says which paperwork the change needs. A
+version bumped in code without the documentation and changelog to match fails
+too, on purpose: a version nobody can look up is not a version.
 
 ## Getting set up
 

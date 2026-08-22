@@ -112,6 +112,7 @@ pub fn compare(before: &Digest, after: &Digest) -> Comparison {
     });
 
     Comparison {
+        schema: crate::model::SCHEMA_VERSION,
         before: before.generated_at.clone(),
         after: after.generated_at.clone(),
         repos,
