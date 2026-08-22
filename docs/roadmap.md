@@ -9,11 +9,6 @@ A feature that cannot meet that does not belong here.
 
 ## Operating it
 
-### `--fail-if-empty`
-
-For cron and CI use, where a digest with nothing in it should be a signal rather
-than an empty message posted to a channel.
-
 ### Cache plumbing results
 
 Large repositories re-walk the same history on every run. Caching by head sha

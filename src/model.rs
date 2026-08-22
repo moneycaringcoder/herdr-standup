@@ -670,6 +670,31 @@ impl Digest {
             .filter(|r| r.activity() != Activity::Quiet)
             .collect()
     }
+
+    /// Whether this digest has nothing to report.
+    ///
+    /// What `--fail-if-empty` asks, and the definition is deliberately wider
+    /// than "no commits":
+    ///
+    /// - a repository holding **uncommitted or unpushed** work is not nothing.
+    ///   It is somebody's work at risk, which is the case most worth posting.
+    /// - a **problem** is not nothing. A checkout whose branch was deleted, or a
+    ///   count that could not be read, is a signal, and a flag meant to catch
+    ///   silence must not swallow it.
+    /// - a **warning note** is not nothing either, for the same reason: a
+    ///   worktree that could not be listed means the digest is incomplete, and
+    ///   an incomplete digest is not an empty one.
+    ///
+    /// Everything above already sorts as [`Activity::Broken`] or louder, so this
+    /// is `busy_repos` plus the digest-level notes rather than a second, parallel
+    /// idea of what counts.
+    pub fn is_quiet(&self) -> bool {
+        self.busy_repos().is_empty()
+            && !self
+                .notes
+                .iter()
+                .any(|note| note.severity != Severity::Info)
+    }
 }
 
 // ---------------------------------------------------------------------------

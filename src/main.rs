@@ -45,14 +45,30 @@ Selection:
   --no-siblings       Only checkouts a workspace is sitting in
   --max-commits <N>   Commits listed per checkout before the rest are summarised
 
+Exit status:
+  --fail-if-empty     Exit 2 when there is nothing to report, for cron and CI.
+                      The digest still prints. 2 rather than 1, because 1 means
+                      the run failed and a quiet day is not a failure.
+
 standup never writes to a repository and makes no network calls.
 ";
 
+/// Exit status when `--fail-if-empty` finds nothing to report.
+///
+/// **2, not 1.** A failure already exits 1, and cron cannot act on a status that
+/// means either "nothing happened today" or "the digest is broken". The two are
+/// opposite messages: one is a quiet day, the other needs somebody to look.
+const EXIT_EMPTY: i32 = 2;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(err) = run(&args) {
-        eprintln!("standup: {err}");
-        std::process::exit(1);
+    match run(&args) {
+        Err(err) => {
+            eprintln!("standup: {err}");
+            std::process::exit(1);
+        }
+        Ok(code) if code != 0 => std::process::exit(code),
+        Ok(_) => {}
     }
 }
 
@@ -67,11 +83,12 @@ const VALUED: [&str; 6] = [
 ];
 
 /// Options that stand alone.
-const FLAGS: [&str; 9] = [
+const FLAGS: [&str; 10] = [
     "--since-last",
     "--weekly",
     "--monthly",
     "--by-agent",
+    "--fail-if-empty",
     "--offline",
     "--busy",
     "--all",
@@ -151,7 +168,7 @@ fn verb_of(args: &[String]) -> &str {
     "--report"
 }
 
-fn run(args: &[String]) -> Result<()> {
+fn run(args: &[String]) -> Result<i32> {
     let verb = verb_of(args);
     // `--help` has to work even when the rest of the line is wrong; that is
     // usually why somebody is asking for it.
@@ -187,7 +204,10 @@ fn run(args: &[String]) -> Result<()> {
                 let before = compare::read_digest(std::path::Path::new(&earlier))?;
                 let comparison = compare::compare(&before, &digest);
                 print!("{}", render::render_comparison(&comparison, &config)?);
-                return Ok(());
+                // What this run would post is the comparison, so that is what
+                // "empty" has to describe here. A comparison where nothing moved
+                // is exactly the message not worth sending.
+                return Ok(empty_status(&config, comparison.is_quiet()));
             }
 
             print!("{}", render::render(&digest, &config)?);
@@ -197,17 +217,30 @@ fn run(args: &[String]) -> Result<()> {
                     eprintln!("standup: could not record this run for --since-last: {err}");
                 }
             }
-            Ok(())
+            Ok(empty_status(&config, digest.is_quiet()))
         }
         "--version" => {
             println!("standup {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
+            Ok(0)
         }
         "--help" | "-h" => {
             print!("{USAGE}");
-            Ok(())
+            Ok(0)
         }
         other => Err(format!("unknown verb `{other}`\n\n{USAGE}").into()),
+    }
+}
+
+/// The exit status for a run that has already printed its output.
+///
+/// The digest is printed either way. `--fail-if-empty` is about what a caller
+/// does next, and suppressing the output would take away the one thing that
+/// tells a person reading the cron mail why the run failed.
+fn empty_status(config: &config::Config, quiet: bool) -> i32 {
+    if config.fail_if_empty && quiet {
+        EXIT_EMPTY
+    } else {
+        0
     }
 }
 
