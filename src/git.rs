@@ -10,6 +10,8 @@
 //! - reads only — no `add`, no `write-tree`, no `merge-tree`, nothing that
 //!   creates an object;
 //! - runs with `GIT_OPTIONAL_LOCKS=0`;
+//! - runs with `GIT_NO_LAZY_FETCH=1`, so a partial clone is never filled in
+//!   from its promisor remote — see below;
 //! - runs the two `diff --shortstat` invocations with `GIT_INDEX_FILE` pointed
 //!   at a throwaway **copy** of the worktree's index, never at the real one.
 //!
@@ -39,6 +41,54 @@
 //! It only has teeth against a **stale** stat cache, because a fresh one gives
 //! git nothing to write back — which is exactly how this bug survived the first
 //! version of that test.
+//!
+//! # The partial clone
+//!
+//! A `--filter=blob:none` clone holds the commits and the trees and almost none
+//! of the blobs. A diff needs blobs, and git's answer to a missing one is to
+//! fetch it from the promisor remote and write it into `.git/objects` — a write
+//! to the user's repository and a network call, from the two invocations that
+//! have always wanted a diff: `log --numstat` for the churn, and `log -p` for
+//! the landing probes. Measured on git 2.53.0 against a real blobless clone,
+//! one `log --numstat` over the history took the object store from **8 files to
+//! 24**, silently.
+//!
+//! `GIT_NO_LAZY_FETCH=1` refuses the fetch. git then exits 128 and names the
+//! object it would have had to fetch, which is reported rather than papered
+//! over. Measured on the same clone, with the same invocations: zero objects
+//! written.
+//!
+//! The cost is real and is the point. On a partial clone the line counts and
+//! the merge status are **unavailable**, where before they were available and
+//! paid for with a write:
+//!
+//! - the churn: [`Git::commits`] reads the log again without `--numstat`, so
+//!   the commits themselves survive with a problem beside them naming the
+//!   object. A missing blob must not cost a reader the commit list.
+//! - the squash and rebase probes: `log -p` over the trunk range fails, and
+//!   [`Landed::Unknown`] carries git's own words. "I could not find out" is a
+//!   different message from "this did not land", and this is exactly the case
+//!   that must not be allowed to collapse into the second one.
+//!
+//! The rest of the report survives: `status`, both `diff --shortstat`
+//! invocations, `merge-base` and `rev-list` ask only about the checkout's own
+//! commit and index, and were measured writing nothing. `git cherry` hashes
+//! patches and so can want a blob that is not there; when it does it is a probe
+//! failure like any other, and lands as [`Landed::Unknown`] rather than as an
+//! answer.
+//!
+//! ## Below git 2.37 the variable is not enough
+//!
+//! `GIT_NO_LAZY_FETCH` arrived in git 2.37 — the same release as
+//! `--since-as-filter`. An older git ignores it outright: measured on 2.36.6
+//! against the same blobless clone, one `log --numstat` with the variable set
+//! wrote **nine object files**. A promise that depends on the reader's git
+//! being new enough is not a promise, so on such a git the diff is not asked
+//! for at all. [`Git::unrefusable_promisor`] answers whether that applies —
+//! partial clone *and* a git that cannot be told no — and [`Git::commits`] then
+//! omits `--numstat`, while [`Git::landing`] returns [`Landed::Unknown`]
+//! without running a probe. The reader is told which remote was declined and
+//! why, rather than being given a number that cost them a fetch.
 //!
 //! # The traps this module exists to avoid
 //!
@@ -92,6 +142,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::cache::Cache;
@@ -206,6 +257,9 @@ pub struct Git {
     timeout: Duration,
     ignored: Ignored,
     cache: Cache,
+    /// Whether this git honours `GIT_NO_LAZY_FETCH`, resolved on first use and
+    /// only in a partial clone. See [`Git::refuses_lazy_fetch`].
+    refuses_lazy_fetch: OnceLock<bool>,
 }
 
 /// One finished invocation. `code` is `None` when the child was killed by a
@@ -244,6 +298,21 @@ impl GitOut {
         }
         line
     }
+
+    /// Stderr as a reader sees it: [`GitOut::stderr_text`] with git's
+    /// `lazy fetching disabled` preamble dropped when git went on to say
+    /// something specific.
+    ///
+    /// Every refused promisor fetch carries that warning, so a reason built out
+    /// of the raw text reads "warning: lazy fetching disabled; some objects may
+    /// not be available fatal: could not fetch <oid> …" — the mechanism twice
+    /// over, in front of the one clause that names the object. Detection still
+    /// runs on the raw text, because a stderr that is *only* the warning has
+    /// nothing else to identify it by.
+    fn stderr_reported(&self) -> String {
+        let text = self.stderr_text();
+        refused_promisor_fetch(&text).unwrap_or(text)
+    }
 }
 
 impl Git {
@@ -255,6 +324,7 @@ impl Git {
             timeout,
             ignored: Ignored::default(),
             cache: Cache::in_memory(),
+            refuses_lazy_fetch: OnceLock::new(),
         }
     }
 
@@ -408,16 +478,23 @@ impl Git {
             .filter(GitOut::ok)
             .map(|out| PathBuf::from(out.stdout_text()));
 
+        // Asked once per checkout, and only ever answered `Some` on a git too
+        // old to be told not to fetch. Everything downstream that would produce
+        // a diff then declines to run rather than pulling blobs into someone's
+        // repository; see the module note on the partial clone.
+        let promisor = self.unrefusable_promisor(&path, &mut problems);
+        let promisor = promisor.as_deref();
+
         let head = self.head(&path, git_dir.as_deref(), &mut problems);
         let (commits, churn) = match head {
             // An unborn branch has no history to walk, and `git log` refuses
             // outright. That is the expected state, not a problem.
             Head::Unborn { .. } => (Vec::new(), Churn::default()),
-            _ => self.commits(&path, window, &mut problems),
+            _ => self.commits(&path, window, promisor, &mut problems),
         };
         let dirty = self.dirty(&path, git_dir.as_deref(), &mut problems);
         let tracking = self.tracking(&path, &head, &mut problems);
-        let landed = self.landed(&path, &head, &mut problems);
+        let landed = self.landed(&path, &head, promisor, &mut problems);
         let unpushed = self.unpushed(&path, &head, &mut problems);
 
         CheckoutReport {
@@ -526,7 +603,7 @@ impl Git {
             return Err(format!(
                 "could not create the date-reference repository at {}: {}",
                 path.display(),
-                out.stderr_text()
+                out.stderr_reported()
             )
             .into());
         }
@@ -616,10 +693,15 @@ impl Git {
     }
 
     /// The commits in the window, and the churn they add up to.
+    ///
+    /// `promisor` names the remote a partial clone would be filled in from when
+    /// this git cannot be told not to; the `--numstat` is then not asked for at
+    /// all, since asking is what triggers the fetch.
     fn commits(
         &self,
         path: &Path,
         window: &Window,
+        promisor: Option<&str>,
         problems: &mut Vec<String>,
     ) -> (Vec<Commit>, Churn) {
         let since = format!("--since-as-filter=@{}", window.since.epoch);
@@ -633,7 +715,20 @@ impl Git {
         if let Some(until) = until.as_deref() {
             args.push(until);
         }
-        args.extend_from_slice(&["--numstat", "-z", "--no-renames", LOG_FORMAT]);
+        if let Some(promisor) = promisor {
+            problems.push(format!(
+                "could not count the lines changed in {}: this is a partial clone of {promisor}, \
+                 and {} predates GIT_NO_LAZY_FETCH (git 2.37), so it cannot be told to refuse the \
+                 fetch the diff would need. The diff is therefore not run at all, rather than \
+                 filling in your repository from its remote. The commits are reported in full; \
+                 their line counts read as zero.",
+                path.display(),
+                self.program.display()
+            ));
+        } else {
+            args.push("--numstat");
+        }
+        args.extend_from_slice(&["-z", "--no-renames", LOG_FORMAT]);
 
         let Some(mut out) = self.capture(path, &args, problems) else {
             return (Vec::new(), Churn::default());
@@ -656,6 +751,29 @@ impl Git {
             out = fallback;
         }
 
+        // A partial clone has none of the blobs a `--numstat` needs, and
+        // refusing to fetch them (see the module note) fails the *whole* log
+        // rather than the numstat half of it. So read it again without
+        // `--numstat`: commits and their subjects need no blobs, and a missing
+        // line count must not be allowed to render a busy day as an empty one.
+        let refusal = (!out.ok())
+            .then(|| refused_promisor_fetch(&out.stderr_text()))
+            .flatten();
+        if let Some(refusal) = refusal {
+            problems.push(format!(
+                "could not count the lines changed in {}: {refusal}. This is a partial clone, so \
+                 the blobs the diff needs are not in it, and fetching them would write to the \
+                 repository and reach the network — which this plugin never does. The commits are \
+                 reported in full; their line counts read as zero.",
+                path.display()
+            ));
+            args.retain(|arg| *arg != "--numstat");
+            let Some(without_numstat) = self.capture(path, &args, problems) else {
+                return (Vec::new(), Churn::default());
+            };
+            out = without_numstat;
+        }
+
         if !out.ok() {
             let stderr = out.stderr_text();
             // A branch with no commits yet. Reached when HEAD is a deleted
@@ -665,8 +783,9 @@ impl Git {
                 return (Vec::new(), Churn::default());
             }
             problems.push(format!(
-                "could not read the log of {}: {stderr}",
-                path.display()
+                "could not read the log of {}: {}",
+                path.display(),
+                out.stderr_reported()
             ));
             return (Vec::new(), Churn::default());
         }
@@ -715,7 +834,7 @@ impl Git {
                 problems.push(format!(
                     "could not read the status of {}: {}",
                     path.display(),
-                    out.stderr_text()
+                    out.stderr_reported()
                 ));
             }
         }
@@ -749,7 +868,7 @@ impl Git {
                             problems.push(format!(
                                 "could not measure uncommitted changes in {}: {}",
                                 path.display(),
-                                out.stderr_text()
+                                out.stderr_reported()
                             ));
                         }
                     }
@@ -851,7 +970,7 @@ impl Git {
             Some(out) => {
                 problems.push(format!(
                     "could not compare {name} with {upstream}: {}",
-                    out.stderr_text()
+                    out.stderr_reported()
                 ));
                 Tracking::UpstreamMissing { name: upstream }
             }
@@ -904,7 +1023,7 @@ impl Git {
                     format!(
                         "git remote exited {}: {}",
                         exit_label(out.code),
-                        out.stderr_text()
+                        out.stderr_reported()
                     ),
                     problems,
                 )
@@ -924,7 +1043,7 @@ impl Git {
                 format!(
                     "git rev-list exited {}: {}",
                     exit_label(out.code),
-                    out.stderr_text()
+                    out.stderr_reported()
                 ),
                 problems,
             );
@@ -952,7 +1071,13 @@ impl Git {
     /// Never a bare `NotMerged` when the question could not be asked: "we could
     /// not find a default branch" and "this did not land" are opposite messages
     /// to the person reading the digest.
-    fn landed(&self, path: &Path, head: &Head, problems: &mut Vec<String>) -> Landed {
+    fn landed(
+        &self,
+        path: &Path,
+        head: &Head,
+        promisor: Option<&str>,
+        problems: &mut Vec<String>,
+    ) -> Landed {
         let Some(trunk) = self.default_branch(path, problems) else {
             return Landed::Unknown {
                 reason: "no default branch found: no refs/remotes/origin/HEAD, and none of the \
@@ -992,7 +1117,7 @@ impl Git {
         if let Some(landed) = self.cache.answer(&key) {
             return landed;
         }
-        let landed = self.landing(path, oid, trunk, problems);
+        let landed = self.landing(path, oid, trunk, promisor, problems);
         // A failure is not an answer and is never stored: git could not be run
         // this time, and caching that would make one bad minute permanent.
         if !matches!(landed, Landed::Unknown { .. }) {
@@ -1004,7 +1129,14 @@ impl Git {
     /// The two questions behind [`Landed`], for a checkout that is not the trunk
     /// and has a commit. Split out so the cache above has exactly one thing to
     /// wrap, and so the expensive path is one call away from being read.
-    fn landing(&self, path: &Path, oid: &str, trunk: Trunk, problems: &mut Vec<String>) -> Landed {
+    fn landing(
+        &self,
+        path: &Path,
+        oid: &str,
+        trunk: Trunk,
+        promisor: Option<&str>,
+        problems: &mut Vec<String>,
+    ) -> Landed {
         let Trunk {
             name: default,
             oid: trunk_oid,
@@ -1023,21 +1155,36 @@ impl Git {
             // Exit 1 is "not contained", which is not the same as "did not
             // land"; see `equivalent_patch`. A probe that could not be run is
             // not an answer either, and must not arrive as one.
-            Some(1) => match self.equivalent_patch(path, oid, &default, &trunk_oid, problems) {
-                Ok(Some(how)) => Landed::Equivalent { into: default, how },
-                Ok(None) => Landed::NotMerged { into: default },
-                Err(reason) => Landed::Unknown {
+            //
+            // On a partial clone this git would fill in, the probes are not run
+            // at all: every one of them wants a diff, and the objects would
+            // arrive from the remote as the price of asking.
+            Some(1) => match promisor {
+                Some(promisor) => Landed::Unknown {
                     reason: format!(
-                        "HEAD is not on {default} by sha, and {reason}, so a squash or rebase \
-                         merge cannot be ruled out"
+                        "HEAD is not on {default} by sha, and every remaining probe needs a diff \
+                         that would be paid for with a fetch: this is a partial clone of \
+                         {promisor}, and {} predates GIT_NO_LAZY_FETCH (git 2.37), so the fetch \
+                         cannot be refused, and a squash or rebase merge cannot be ruled out",
+                        self.program.display()
                     ),
+                },
+                None => match self.equivalent_patch(path, oid, &default, &trunk_oid, problems) {
+                    Ok(Some(how)) => Landed::Equivalent { into: default, how },
+                    Ok(None) => Landed::NotMerged { into: default },
+                    Err(reason) => Landed::Unknown {
+                        reason: format!(
+                            "HEAD is not on {default} by sha, and {reason}, so a squash or rebase \
+                             merge cannot be ruled out"
+                        ),
+                    },
                 },
             },
             other => Landed::Unknown {
                 reason: format!(
                     "git merge-base --is-ancestor exited {} against {default}: {}",
                     exit_label(other),
-                    out.stderr_text()
+                    out.stderr_reported()
                 ),
             },
         }
@@ -1085,7 +1232,7 @@ impl Git {
                 return Err(format!(
                     "git merge-base exited {}: {}",
                     exit_label(out.code),
-                    out.stderr_text()
+                    out.stderr_reported()
                 ))
             }
             None => return Err("git merge-base could not be run".to_string()),
@@ -1172,7 +1319,7 @@ impl Git {
             Some(out) => Err(format!(
                 "git {name} exited {}: {}",
                 exit_label(out.code),
-                out.stderr_text()
+                out.stderr_reported()
             )),
             None => Err(format!("git {name} could not be run")),
         }
@@ -1209,7 +1356,7 @@ impl Git {
                 return Err(format!(
                     "git {name} exited {}: {}",
                     exit_label(out.code),
-                    out.stderr_text()
+                    out.stderr_reported()
                 ))
             }
             None => return Err(format!("git {name} could not be run")),
@@ -1223,7 +1370,7 @@ impl Git {
                 return Err(format!(
                     "git patch-id exited {}: {}",
                     exit_label(out.code),
-                    out.stderr_text()
+                    out.stderr_reported()
                 ))
             }
             None => return Err("git patch-id could not be run".to_string()),
@@ -1286,6 +1433,61 @@ impl Git {
         .filter(GitOut::ok)
         .map(|out| out.stdout_text())
         .filter(|oid| !oid.is_empty())
+    }
+
+    /// The promisor remote this checkout would be filled in from behind our
+    /// back, if it has one this git cannot be stopped from using.
+    ///
+    /// `None` in the two ordinary cases — the repository is not a partial clone,
+    /// or the git in front of us honours `GIT_NO_LAZY_FETCH` — and it is
+    /// deliberately the second question first, so a modern git pays nothing at
+    /// all: no extra invocation per checkout, and no `config` read.
+    ///
+    /// Both spellings are asked for at once, because git records the fact twice
+    /// and a clone need not have both: `extensions.partialclone` is the
+    /// repository-format extension, and `remote.<name>.promisor` is the per-remote
+    /// flag. Measured on git 2.53.0, a `clone --filter=blob:none` writes the
+    /// second and not the first. `--get-regexp` exits 1 when nothing matches,
+    /// which is the answer rather than a fault.
+    fn unrefusable_promisor(&self, path: &Path, problems: &mut Vec<String>) -> Option<String> {
+        if self.refuses_lazy_fetch(path) {
+            return None;
+        }
+        let out = self
+            .capture(
+                path,
+                &[
+                    "config",
+                    "--get-regexp",
+                    r"^(extensions\.partialclone|remote\..*\.promisor)$",
+                ],
+                problems,
+            )
+            .filter(GitOut::ok)?;
+        out.stdout_text().lines().find_map(promisor_name)
+    }
+
+    /// Whether this git honours `GIT_NO_LAZY_FETCH`, which arrived in **git
+    /// 2.37** — the same release as `--since-as-filter`.
+    ///
+    /// Measured against one blobless clone: on 2.53.0 the variable refuses the
+    /// fetch and one `log --numstat` writes nothing; on 2.36.6 it is ignored
+    /// outright and the same command wrote nine object files. So the variable
+    /// alone is not the guarantee — below 2.37 the diff has to not be asked for.
+    ///
+    /// Resolved once per run — one `git version` for a whole session, cached
+    /// here — and a version this cannot parse counts as **old**, because the two
+    /// ways of being wrong are not symmetrical: one costs a line count, the
+    /// other writes to somebody's repository.
+    fn refuses_lazy_fetch(&self, path: &Path) -> bool {
+        *self.refuses_lazy_fetch.get_or_init(|| {
+            self.run(path, &["version"])
+                .ok()
+                .filter(GitOut::ok)
+                .and_then(|out| parse_version(&out.stdout_text()))
+                .map(|version| version >= (2, 37))
+                .unwrap_or(false)
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -1368,7 +1570,7 @@ impl Git {
                 "git {} failed in {}: {}",
                 args.join(" "),
                 dir.display(),
-                out.stderr_text()
+                out.stderr_reported()
             )
             .into());
         }
@@ -1433,6 +1635,12 @@ impl Git {
             command.env_remove(key);
         }
         command.env("GIT_OPTIONAL_LOCKS", "0");
+        // A partial clone's missing blobs are fetched from its promisor remote
+        // on demand, which writes objects into the repository and reaches the
+        // network. Both are things this plugin promises never to do, so the
+        // fetch is refused and the invocation fails naming the object instead;
+        // see the module note on the partial clone.
+        command.env("GIT_NO_LAZY_FETCH", "1");
         // A plugin has no terminal to prompt on; without this a repository with
         // an http remote can block forever asking for a password.
         command.env("GIT_TERMINAL_PROMPT", "0");
@@ -1798,6 +2006,74 @@ fn exit_label(code: Option<i32>) -> String {
         .unwrap_or_else(|| "on a signal".to_string())
 }
 
+/// git's own account of a fetch it refused because `GIT_NO_LAZY_FETCH=1` is
+/// set, or `None` when the failure was something else entirely.
+///
+/// Two things arrive on a refusal, measured on git 2.53.0 against a blobless
+/// clone and flattened into one line by [`GitOut::stderr_text`]:
+///
+/// ```text
+/// warning: lazy fetching disabled; some objects may not be available
+/// fatal: could not fetch e3169e47… from promisor remote
+/// ```
+///
+/// The warning is the mechanism, identical on every refusal; the fatal is the
+/// news, and it names the object, which is the whole reason to report this
+/// rather than a shrug. So the warning is dropped and everything from the first
+/// `fatal:` or `error:` onward is kept.
+///
+/// Both markers are matched because either alone identifies the case: git could
+/// reword one of them, and a refused fetch reported as an unexplained log
+/// failure would send the reader looking for a corrupt repository.
+fn refused_promisor_fetch(stderr: &str) -> Option<String> {
+    if !stderr.contains("promisor") && !stderr.contains("lazy fetching disabled") {
+        return None;
+    }
+    let news = ["fatal:", "error:"]
+        .iter()
+        .filter_map(|marker| stderr.find(marker))
+        .min()
+        .map_or(stderr, |at| &stderr[at..]);
+    Some(news.trim().to_string())
+}
+
+/// `(major, minor)` out of `git version 2.36.6`, or `None` when the line is not
+/// one this can be sure of.
+///
+/// Only two numbers, because every capability this module gates on landed in a
+/// feature release. The trailing junk is real: Apple's build prints
+/// `git version 2.39.5 (Apple Git-154)`, and a Windows build appends
+/// `.windows.1`, so the version is taken as the first whitespace-delimited word
+/// that starts with a digit and read up to its second dot.
+fn parse_version(text: &str) -> Option<(u32, u32)> {
+    let field = text
+        .split_whitespace()
+        .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))?;
+    let mut numbers = field.split('.');
+    let major = numbers.next()?.parse().ok()?;
+    let minor = numbers.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// The promisor remote named by one `git config --get-regexp` line, if it names
+/// one.
+///
+/// `extensions.partialclone <remote>` carries the name as its value;
+/// `remote.<name>.promisor true` carries it in the key, and the value has to be
+/// read because the flag can be set to `false`. A boolean written with no value
+/// at all prints as the bare key and means true, which is git's own reading.
+fn promisor_name(line: &str) -> Option<String> {
+    let (key, value) = match line.split_once(char::is_whitespace) {
+        Some((key, value)) => (key, value.trim()),
+        None => (line.trim(), ""),
+    };
+    if key == "extensions.partialclone" {
+        return (!value.is_empty()).then(|| value.to_string());
+    }
+    let name = key.strip_prefix("remote.")?.strip_suffix(".promisor")?;
+    matches!(value, "" | "true" | "yes" | "on" | "1").then(|| name.to_string())
+}
+
 /// An unreadable at-risk count, recorded twice on purpose.
 ///
 /// The state carries the reason for the JSON, and `problems` carries it for the
@@ -1911,5 +2187,43 @@ mod tests {
             "unexpected git path {}",
             git.program().display()
         );
+    }
+
+    /// The three shapes `git --version` is known to print. The Apple and Windows
+    /// builds are why this reads a prefix rather than the whole field.
+    #[test]
+    fn a_git_version_is_read_as_major_and_minor() {
+        assert_eq!(parse_version("git version 2.36.6"), Some((2, 36)));
+        assert_eq!(
+            parse_version("git version 2.39.5 (Apple Git-154)"),
+            Some((2, 39))
+        );
+        assert_eq!(parse_version("git version 2.51.0.windows.1"), Some((2, 51)));
+    }
+
+    /// An unreadable version must not be mistaken for a new one: the caller
+    /// treats `None` as a git that cannot refuse a promisor fetch, and the
+    /// alternative is writing to someone's repository.
+    #[test]
+    fn an_unreadable_version_is_no_answer_at_all() {
+        assert_eq!(parse_version(""), None);
+        assert_eq!(parse_version("git version UNKNOWN"), None);
+        assert_eq!(parse_version("git version 2"), None);
+    }
+
+    /// The refusal is reported with the clause that names the object, not with
+    /// the warning every refusal carries — and anything else git says is left
+    /// alone.
+    #[test]
+    fn a_refused_fetch_is_reported_by_the_object_it_could_not_read() {
+        let refusal = refused_promisor_fetch(
+            "warning: lazy fetching disabled; some objects may not be available fatal: could not \
+             fetch e3169e47 from promisor remote",
+        );
+        assert_eq!(
+            refusal.as_deref(),
+            Some("fatal: could not fetch e3169e47 from promisor remote")
+        );
+        assert_eq!(refused_promisor_fetch("fatal: bad object HEAD"), None);
     }
 }
