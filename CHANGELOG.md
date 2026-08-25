@@ -36,6 +36,15 @@ All notable changes to this project are recorded here. The format follows
   line volume, the tracking numbers and the at-risk count all read objects the
   checkout already has, and were measured writing nothing.
 
+  `GIT_NO_LAZY_FETCH` is itself a git 2.37 feature, and an older git ignores it:
+  measured on 2.36.6 against the same clone, with the variable set, **nine
+  object files written**, exit 0, no warning. A guarantee that depends on the
+  reader's git being new enough is not a guarantee, so below 2.37 the diff is
+  not asked for at all on a partial clone — and the note then names the remote
+  it declined to reach for, and why, since nothing was read to name. A version
+  string that cannot be parsed counts as old, because the two ways of being
+  wrong cost different things: a line count, or somebody's repository.
+
   `tests/read_only.rs` now enforces this instead of asserting it. Its fixtures
   had no promisor remote, so there was nothing to lazily fetch and the guarantee
   was untestable by construction; it now builds a real blobless clone of a

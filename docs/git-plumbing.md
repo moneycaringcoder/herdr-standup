@@ -84,6 +84,21 @@ What fails, on the same clone:
   succeeded on the measured clone, whose two checked-out trees happened to carry
   every blob it wanted; that is a property of the fixture, not a guarantee.
 
+`GIT_NO_LAZY_FETCH` is itself a git 2.37 feature, and an older git ignores it.
+Measured on 2.36.6 against the same clone, with the variable set: **9 object
+files written**, exit 0, no warning. So below 2.37 the variable is not the
+guarantee — the diff has to not be asked for. `Git::unrefusable_promisor` asks
+two questions in that order (can this git refuse? is this a partial clone?), and
+when the answer is "no, and yes" the churn is collected without `--numstat` and
+the landing probes do not run at all. The remote that was declined is named on
+the report instead of an object, because nothing was read to name.
+
+A partial clone is detected from `git config --get-regexp
+'^(extensions\.partialclone|remote\..*\.promisor)$'`. Both spellings are asked
+for because git records the fact twice and a clone need not have both: measured
+on 2.53.0, `clone --filter=blob:none` writes `remote.origin.promisor=true` and
+`remote.origin.partialclonefilter=blob:none`, and **no** `extensions.partialClone`.
+
 What does not fail: `status --porcelain=v2`, both `diff --shortstat`
 invocations, `merge-base`, `rev-list --count` and `rev-parse`. They read the
 checkout's own trees and index, which a partial clone has.

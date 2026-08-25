@@ -37,6 +37,11 @@ files becoming 24, from one `log --numstat`. `GIT_NO_LAZY_FETCH=1` refuses that,
 at the cost of the line counts and the merge status on such a clone, which are
 then reported as unavailable and never as zero or `not merged`.
 
+`GIT_NO_LAZY_FETCH` arrived in git 2.37 and an older git ignores it, so on such
+a git the diff must not be asked for at all rather than set-and-hope. That is
+what `Git::unrefusable_promisor` is for, and why `commits` and `landing` both
+take it.
+
 `tests/read_only.rs` enforces it by fingerprinting the index bytes, working
 tree, refs, reflogs and object count before and after a full run. If your change
 makes that test fail, the test is right and the change is wrong.

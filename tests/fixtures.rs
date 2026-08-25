@@ -273,6 +273,31 @@ impl Fixture {
         ))
     }
 
+    /// `(major, minor)` of the git these fixtures and the collector are both
+    /// running against.
+    ///
+    /// For the handful of tests whose *expected answer* depends on the version,
+    /// which is not the same thing as a test that tolerates any version: a
+    /// feature that arrived in 2.37 has two correct behaviours either side of
+    /// that line, and asserting one of them everywhere means the other is never
+    /// checked. `git --version` prints `git version 2.36.6`, with a vendor
+    /// suffix on some builds, so only the first two numbers are read.
+    pub fn git_version(&self) -> (u32, u32) {
+        let printed = self.git(&self.root, &["--version"]);
+        let field = printed
+            .split_whitespace()
+            .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))
+            .unwrap_or_else(|| panic!("no version in {printed:?}"));
+        let mut numbers = field.split('.');
+        let mut number = |what: &str| {
+            numbers
+                .next()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or_else(|| panic!("no {what} version in {printed:?}"))
+        };
+        (number("major"), number("minor"))
+    }
+
     /// `git <args> | git patch-id --stable`, as `(patch id, commit)` pairs.
     ///
     /// Only `git_contract.rs` needs this: it asserts that git itself agrees

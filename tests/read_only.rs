@@ -702,6 +702,12 @@ fn reporting_a_partial_clone_fetches_nothing_and_names_what_it_could_not_read() 
         report.churn
     );
 
+    // Which sentence a reader gets depends on the git in front of them, and both
+    // are honest. A git that honours `GIT_NO_LAZY_FETCH` asks for the diff, is
+    // refused, and names the object it could not read; one that predates the
+    // variable (2.37) is not asked for the diff at all, and names the remote it
+    // declined to reach for and the reason why.
+    let refuses = fixture.git_version() >= (2, 37);
     let named = report
         .problems
         .iter()
@@ -712,18 +718,28 @@ fn reporting_a_partial_clone_fetches_nothing_and_names_what_it_could_not_read() 
                 report.problems
             )
         });
-    assert!(
-        names_an_object(named),
-        "the problem has to name the object, not just the category: {named}"
-    );
+    if refuses {
+        assert!(
+            names_an_object(named),
+            "the problem has to name the object, not just the category: {named}"
+        );
+    } else {
+        assert!(
+            named.contains("GIT_NO_LAZY_FETCH") && named.contains("partial clone of origin"),
+            "an old git has to say which remote it refused to reach for, and why: {named}"
+        );
+    }
 
     // And the merge status, which the same missing blobs make unanswerable.
-    // "I could not find out" is not "this did not land", and the reason carries
-    // git's own words so the object is named there too.
+    // "I could not find out" is not "this did not land".
     match &report.landed {
-        Landed::Unknown { reason } => assert!(
+        Landed::Unknown { reason } if refuses => assert!(
             names_an_object(reason),
             "the unknown verdict has to say which object it could not read: {reason}"
+        ),
+        Landed::Unknown { reason } => assert!(
+            reason.contains("GIT_NO_LAZY_FETCH"),
+            "the unknown verdict has to say why the probes did not run: {reason}"
         ),
         other => panic!("a probe that could not read the trunk is not an answer: {other:?}"),
     }

@@ -462,6 +462,10 @@ commits are still reported in full and the churn reads zero with a problem namin
 could not read, and the merge status, which reads `merge status unknown: …` rather than `not merged`.
 An absent answer, loudly, instead of a wrong one quietly — and instead of a write.
 
+`GIT_NO_LAZY_FETCH` is itself a git 2.37 feature, and an older git ignores it — measured on 2.36.6,
+nine object files written with the variable set. So below 2.37 the diff is **not asked for at all**
+on a partial clone, and the note names the remote it declined to reach for instead of an object.
+
 There are also **no network calls at all** — no GitHub API, no telemetry, no update check. The digest
 works on a plane.
 
