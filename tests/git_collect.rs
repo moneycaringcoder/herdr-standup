@@ -16,7 +16,8 @@ use standup::git::Git;
 use standup::model::{Activity, Equivalence, Head, Landed, Tracking, Unpushed};
 
 use fixtures::{
-    window, window_between, Fixture, T_AFTER, T_IN1, T_IN2, T_IN3, T_OLD, T_OLDER, T_SINCE, T_UNTIL,
+    since_as_filter, unexpected_problems, window, window_between, Fixture, T_AFTER, T_IN1, T_IN2,
+    T_IN3, T_OLD, T_OLDER, T_SINCE, T_UNTIL,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -34,6 +35,32 @@ fn id(git: &Git, path: &Path) -> standup::git::CheckoutId {
 
 fn subjects(report: &standup::model::CheckoutReport) -> Vec<&str> {
     report.commits.iter().map(|c| c.subject.as_str()).collect()
+}
+
+/// Asserts the collector found nothing wrong, other than what the git in front
+/// of it is documented to make it say.
+///
+/// Below git 2.37 every walked checkout carries the `--since-as-filter`
+/// fallback note, so a bare `problems.is_empty()` would fail on the old-git CI
+/// row for a reason that is not a bug. Anything else still fails here.
+fn assert_no_problems(report: &standup::model::CheckoutReport) {
+    let unexpected = unexpected_problems(&report.problems);
+    assert!(unexpected.is_empty(), "{unexpected:?}");
+}
+
+/// The activity a checkout has on this git.
+///
+/// A checkout carrying a problem is [`Activity::Broken`] — deliberately, so a
+/// degraded number cannot be read as a quiet day — and below git 2.37 every
+/// walked checkout carries the `--since-as-filter` note. So on such a git the
+/// answer to "how did this checkout read?" really is `Broken`, and that is what
+/// these tests assert there rather than looking the other way.
+fn unless_degraded(activity: Activity) -> Activity {
+    if since_as_filter() {
+        activity
+    } else {
+        Activity::Broken
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +318,7 @@ fn only_commits_inside_the_window_are_reported_and_churn_is_the_union() {
     let git = git();
 
     let report = git.report(&id(&git, &fixture.repo), &window());
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
     assert_eq!(
         subjects(&report),
         vec!["inside: edit the same file again", "inside: two lines"],
@@ -305,7 +332,7 @@ fn only_commits_inside_the_window_are_reported_and_churn_is_the_union() {
     assert_eq!(report.churn.files, 1);
     assert_eq!(report.churn.insertions, 4);
     assert_eq!(report.churn.deletions, 1);
-    assert_eq!(report.activity(), Activity::Active);
+    assert_eq!(report.activity(), unless_degraded(Activity::Active));
 }
 
 #[test]
@@ -321,7 +348,7 @@ fn an_until_bound_trims_the_top_of_the_window() {
         &id(&git, &fixture.repo),
         &window_between(T_SINCE, Some(T_UNTIL)),
     );
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
     assert_eq!(subjects(&report), vec!["inside"]);
 }
 
@@ -333,12 +360,12 @@ fn a_repository_whose_work_is_all_older_than_the_window_is_quiet_not_broken() {
     let git = git();
 
     let report = git.report(&id(&git, &fixture.repo), &window());
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
     assert!(report.commits.is_empty());
     assert_eq!(report.churn.files, 0);
     assert!(report.churn.is_zero());
     assert!(report.dirty.is_clean());
-    assert_eq!(report.activity(), Activity::Quiet);
+    assert_eq!(report.activity(), unless_degraded(Activity::Quiet));
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +382,7 @@ fn generated_and_vendored_paths_are_counted_as_files_and_not_as_lines() {
     let git = git();
 
     let report = git.report(&id(&git, &fixture.repo), &window());
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
     assert_eq!(
         report.churn.files, 3,
         "every touched file is still a touched file"
@@ -486,7 +513,7 @@ fn a_repository_with_no_remote_is_not_holding_unpushed_work() {
 
     let report = git.report(&id(&git, &fixture.repo), &window());
     assert_eq!(report.unpushed, Unpushed::NoRemote, "{:?}", report.problems);
-    assert_eq!(report.activity(), Activity::Quiet);
+    assert_eq!(report.activity(), unless_degraded(Activity::Quiet));
 }
 
 /// An unborn branch has committed nothing, so it is holding nothing — and
@@ -500,7 +527,7 @@ fn an_unborn_branch_has_nothing_unpushed_and_no_problem_about_it() {
 
     let report = git.report(&id(&git, &path), &window());
     assert_eq!(report.unpushed, Unpushed::Commits { count: 0 });
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
 }
 
 /// Unpushed work from before the window still counts. The window measures what
@@ -522,7 +549,7 @@ fn unpushed_work_older_than_the_window_is_not_quiet() {
     assert_eq!(report.unpushed, Unpushed::Commits { count: 1 });
     assert_eq!(
         report.activity(),
-        Activity::Unpushed,
+        unless_degraded(Activity::Unpushed),
         "a checkout that would lose work is not a quiet one"
     );
 }
@@ -534,7 +561,7 @@ fn a_merge_is_a_commit_that_contributes_no_churn() {
     let git = git();
 
     let report = git.report(&id(&git, &fixture.repo), &window());
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
 
     let merge = report
         .commits
@@ -560,7 +587,7 @@ fn a_binary_file_counts_as_a_file_and_an_awkward_path_survives_intact() {
     let git = git();
 
     let report = git.report(&id(&git, &fixture.repo), &window());
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
     assert_eq!(report.commits.len(), 1);
 
     let commit = &report.commits[0];
@@ -598,7 +625,7 @@ fn a_subject_full_of_separators_does_not_desynchronise_the_log_parser() {
     let git = git();
 
     let report = git.report(&id(&git, &fixture.repo), &window());
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
     assert_eq!(
         subjects(&report),
         vec!["an ordinary commit after it", subject.as_str()]
@@ -619,6 +646,11 @@ fn a_subject_full_of_separators_does_not_desynchronise_the_log_parser() {
 /// without pruning, and reports both. The collector uses it, and this test pins
 /// both halves — the collector's answer, and the fact that git still exhibits
 /// the disagreement — so the regression test cannot quietly go vacuous.
+///
+/// On a git without the filtering form there is a *different* right answer, and
+/// it is asserted rather than skipped: the digest is the pruned lower bound, and
+/// it carries the note that says so. That is the branch the old-git row in CI
+/// exists to run.
 #[test]
 fn out_of_order_committer_timestamps_do_not_hide_in_window_commits() {
     let fixture = Fixture::new("skew");
@@ -626,12 +658,28 @@ fn out_of_order_committer_timestamps_do_not_hide_in_window_commits() {
     let git = git();
 
     let report = git.report(&id(&git, &fixture.repo), &window());
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
-    assert_eq!(
-        subjects(&report),
-        vec!["skew: in window, newest", "skew: in window, oldest"],
-        "a backdated commit between them must not hide either one"
-    );
+    if since_as_filter() {
+        assert_no_problems(&report);
+        assert_eq!(
+            subjects(&report),
+            vec!["skew: in window, newest", "skew: in window, oldest"],
+            "a backdated commit between them must not hide either one"
+        );
+    } else {
+        assert_eq!(
+            subjects(&report),
+            vec!["skew: in window, newest"],
+            "the pruning fallback stops at the backdated commit, which is why it is reported"
+        );
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("--since-as-filter")),
+            "a digest that is a lower bound has to say so: {:?}",
+            report.problems
+        );
+    }
 
     // The trap is still real: the same window expressed as the pruning
     // `--max-age` loses the older of the two.
@@ -646,16 +694,19 @@ fn out_of_order_committer_timestamps_do_not_hide_in_window_commits() {
         "git no longer prunes on --max-age; the fallback path and this comment need revisiting"
     );
 
-    // And the filtering form is what the collector actually relies on.
-    let filtered = fixture.git(
-        &fixture.repo,
-        &[
-            "log",
-            &format!("--since-as-filter=@{T_SINCE}"),
-            "--format=%s",
-        ],
-    );
-    assert_eq!(filtered.lines().count(), 2);
+    // And the filtering form is what the collector actually relies on, where it
+    // exists at all.
+    if since_as_filter() {
+        let filtered = fixture.git(
+            &fixture.repo,
+            &[
+                "log",
+                &format!("--since-as-filter=@{T_SINCE}"),
+                "--format=%s",
+            ],
+        );
+        assert_eq!(filtered.lines().count(), 2);
+    }
 }
 
 /// `--since` filters on **commit** date, so the digest must display commit date
@@ -716,7 +767,7 @@ fn a_repository_with_no_commits_at_all_is_unborn() {
         }
     );
     assert!(
-        report.problems.is_empty(),
+        unexpected_problems(&report.problems).is_empty(),
         "an unborn branch is a normal state, not a failure: {:?}",
         report.problems
     );
@@ -737,7 +788,7 @@ fn an_unborn_linked_worktree_is_unborn_too() {
             name: "fresh".to_string()
         }
     );
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
 }
 
 /// The case that looks identical to unborn through `symbolic-ref` alone. The
@@ -788,7 +839,7 @@ fn a_detached_head_reports_its_commit() {
         Head::Detached { oid } => assert_eq!(*oid, fixture.head_oid(&fixture.repo)),
         other => panic!("expected a detached HEAD, got {other:?}"),
     }
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
     assert_eq!(report.tracking, Tracking::NotApplicable);
 }
 
@@ -803,7 +854,7 @@ fn uncommitted_work_is_counted_by_kind_and_by_lines() {
     let git = git();
 
     let report = git.report(&id(&git, &fixture.repo), &window());
-    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_no_problems(&report);
 
     // A modified file, a staged addition, and a rename — the rename being the
     // `2` record whose *two* NUL fields a naive parser reads as two records.

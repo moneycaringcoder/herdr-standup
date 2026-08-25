@@ -7,6 +7,9 @@
 //! assertions below are mostly about *failing loudly* rather than about
 //! producing a value.
 
+#[path = "fixtures.rs"]
+mod fixtures;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -759,6 +762,19 @@ fn today_is_accepted_whichever_instant_this_git_thinks_it_means() {
         started_now || (window.since.epoch <= now && now - window.since.epoch < 86_400 + 3_600),
         "`today` landed outside the current local day: {}",
         window.since.full()
+    );
+
+    // Which branch below is live is a fact about this git, not a coin toss.
+    // Pinning it is what keeps both halves honest: without this, a git that
+    // changed its mind would quietly take the other branch and leave this one
+    // untested — which is exactly what happened when every runner image
+    // converged on 2.55.
+    assert_eq!(
+        started_now,
+        fixtures::git_version() < (2, 55),
+        "git {:?} read `today` as {}, which its version says it should not",
+        fixtures::git_version(),
+        if started_now { "now" } else { "midnight" }
     );
 
     let warnings = warnings(&notes);

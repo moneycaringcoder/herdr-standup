@@ -77,21 +77,32 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --all
 ```
 
-CI runs these on a matrix of five rows: Linux and macOS, arm64 and x86_64, and
-three different runner images, plus one row that installs git from
-`ppa:git-core/ppa` rather than taking the image's. If your local Rust is older
-than CI's, clippy will pass locally and fail there — `rustup update stable`
-first if in doubt.
+CI runs these on a matrix of six rows: Linux and macOS, arm64 and x86_64, three
+different runner images, one row that installs git from `ppa:git-core/ppa`
+rather than taking the image's, and one that runs a git built from source. If
+your local Rust is older than CI's, clippy will pass locally and fail there —
+`rustup update stable` first if in doubt.
 
-**Every row currently runs git 2.55.0**, measured, including the PPA one: the
-images have converged on the newest stable release. So the matrix buys operating
-system and architecture coverage today, not git-version coverage. The PPA row is
-there to *diverge* the moment a newer git ships, which is when it starts paying
-for itself — git 2.55 redefined `--since today` from the current instant to local
+**Every hosted row runs git 2.55.0**, measured, including the PPA one: the
+images have converged on the newest stable release. So those rows buy operating
+system and architecture coverage, not git-version coverage. The PPA row is there
+to *diverge* the moment a newer git ships, which is when it starts paying for
+itself — git 2.55 redefined `--since today` from the current instant to local
 midnight, and no distro shipped a git new enough to have caught that in advance.
-Covering an *older* git, which is where the `--since-as-filter` fallback and the
-pre-2.55 reading of `today` live, needs a pinned build rather than a runner
-image; there is an issue for it.
+
+**The old end is `test (ubuntu-latest, git 2.36.6)`**, which builds that git from
+the kernel.org tarball and caches it, because no hosted image ships anything old
+enough any more. 2.36 sits below both lines the collector's behaviour turns on —
+2.37 brought `--since-as-filter`, and 2.55 changed `today` — so one row
+exercises the `--max-age` fallback, the problem it records, and the pre-2.55
+reading of `today`.
+
+A handful of tests therefore owe *different* answers on either side of a version
+line, and say so rather than tolerating both: `fixtures::git_version` is the one
+place that reads the version, `fixtures::since_as_filter` the one place that
+names 2.37, and `fixtures::unexpected_problems` drops the fallback note that
+every walked checkout carries below it. A test that asserts one behaviour
+everywhere leaves the other untested, which is how a fallback rots.
 
 **When a matrix row goes red, read which step failed first.** `tests/git_contract.rs`
 runs on its own, before everything else, and asserts what *git* does with no

@@ -4,6 +4,43 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- CI covers a git **older** than the two versions the collector's behaviour
+  turns on. The matrix spans six rows, and the first run of the previous five
+  measured all of them as git 2.55.0 — the images have converged on the newest
+  stable release, so the version-sensitive code was tested on exactly one
+  version and the branch that handles old git was dead weight as far as CI was
+  concerned.
+
+  No hosted image ships an old enough git any more, and `ubuntu-22.04` — which
+  would have been 2.34 — begins deprecation on 2026-09-17, so the new row builds
+  **git 2.36.6** from the kernel.org tarball and caches it by version. 2.36 sits
+  below both lines that matter: 2.37 brought `--since-as-filter`, and 2.55
+  redefined `--since today` from the current instant to the local midnight. One
+  row therefore exercises the `--max-age` fallback, the problem it records, and
+  the pre-2.55 reading of `today`, all of which were previously assumed.
+
+  Running the suite against that git found two things and changed a third:
+
+  - `Fixture::unborn_worktree` used `worktree add --orphan`, which is **git
+    2.42**, putting a floor under the whole suite that nothing else needed. The
+    same state is now built by hand — HEAD pointed at a branch that does not
+    exist, no per-worktree `logs/HEAD`, and the 65-byte empty index — and
+    verified against what `--orphan` produces on 2.53.0.
+  - The tests whose *correct answer* differs either side of 2.37 now assert both
+    answers rather than the modern one: below it the digest is the pruned lower
+    bound and says so in a note, every walked checkout therefore reads as
+    `Broken`, and a quiet day exits 0 with that note rather than 2 with
+    "Nothing landed". `fixtures::git_version` is the one place that reads the
+    version, and `since_as_filter` the one place that names 2.37.
+  - `today_is_accepted_whichever_instant_this_git_thinks_it_means` branched on
+    what git *did*, so a git that changed its mind would have silently taken the
+    other branch and left this one untested. It now pins which reading the
+    version owes, and both branches are live in CI.
+
 ## [0.1.1] - 2026-08-22
 
 ### Added
