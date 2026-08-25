@@ -21,7 +21,7 @@ mod fixtures;
 use std::path::Path;
 use std::process::Command;
 
-use fixtures::{Fixture, T_AFTER, T_IN1, T_OLD, T_SINCE};
+use fixtures::{since_as_filter, Fixture, T_AFTER, T_IN1, T_OLD, T_SINCE};
 
 /// The binary this crate builds, which is what a cron line runs.
 const BIN: &str = env!("CARGO_BIN_EXE_standup");
@@ -50,6 +50,31 @@ fn flatten(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The status a quiet checkout yields under `--fail-if-empty`, on this git.
+///
+/// 2 wherever the window can be filtered. Below git 2.37 the collector records
+/// the `--max-age` fallback on every checkout it walks, and a note saying "these
+/// numbers are a lower bound" is something to report rather than silence — so
+/// the same run is 0, with the note in the digest. Both are the promise this
+/// file exists for, which is that the status and the words agree.
+fn quiet_status() -> Option<i32> {
+    if since_as_filter() {
+        Some(2)
+    } else {
+        Some(0)
+    }
+}
+
+/// What a quiet digest says, on this git: silence, or the reason it is a lower
+/// bound.
+fn quiet_words() -> &'static str {
+    if since_as_filter() {
+        "Nothing landed in this window"
+    } else {
+        "does not support --since-as-filter"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Nothing to report
 // ---------------------------------------------------------------------------
@@ -66,7 +91,7 @@ fn without_the_flag_an_empty_digest_still_succeeds() {
         quiet.stdout
     );
     assert!(
-        flatten(&quiet.stdout).contains("Nothing landed in this window"),
+        flatten(&quiet.stdout).contains(quiet_words()),
         "and it says so in words:\n{}",
         quiet.stdout
     );
@@ -76,11 +101,16 @@ fn without_the_flag_an_empty_digest_still_succeeds() {
 fn an_empty_digest_exits_two_and_still_prints() {
     let fixture = Fixture::new("empty-flagged");
     let quiet = run(&fixture.repo, T_SINCE, &["--fail-if-empty"]);
-    assert_eq!(quiet.code, Some(2), "empty is 2:\n{}", quiet.stdout);
+    assert_eq!(
+        quiet.code,
+        quiet_status(),
+        "empty is 2, unless the run has a degradation to report:\n{}",
+        quiet.stdout
+    );
     // Suppressing the output would take away the one thing that tells a person
     // reading the cron mail why the run failed.
     assert!(
-        flatten(&quiet.stdout).contains("Nothing landed in this window"),
+        flatten(&quiet.stdout).contains(quiet_words()),
         "the digest still prints:\n{}",
         quiet.stdout
     );
@@ -186,7 +216,7 @@ fn a_window_that_excludes_the_work_is_empty_again() {
     let fixture = Fixture::new("after-everything");
     fixture.commits_around_the_window();
     let quiet = run(&fixture.repo, T_AFTER, &["--fail-if-empty"]);
-    assert_eq!(quiet.code, Some(2), "{}", quiet.stdout);
+    assert_eq!(quiet.code, quiet_status(), "{}", quiet.stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +233,7 @@ fn the_status_is_the_same_in_every_format() {
         let empty = run(&quiet.repo, T_SINCE, &[verb, "--fail-if-empty"]);
         assert_eq!(
             empty.code,
-            Some(2),
+            quiet_status(),
             "{verb} disagreed about an empty digest:\n{}",
             empty.stdout
         );

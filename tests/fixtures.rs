@@ -22,6 +22,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 
 use standup::model::{Stamp, Window, WindowSource};
 
@@ -41,6 +42,63 @@ pub const T_IN3: i64 = 1_785_801_600;
 pub const T_UNTIL: i64 = 1_785_888_000;
 /// After that bound: 2026-08-06.
 pub const T_AFTER: i64 = 1_785_974_400;
+
+/// `(major, minor)` of the git these tests are running against, read once.
+///
+/// The collector gates two things on the version, and CI runs a row with a git
+/// old enough for both to matter, so a handful of tests owe a *different*
+/// correct answer either side of a version line. That is not the same as a test
+/// that tolerates any version: asserting one of the two behaviours everywhere
+/// means the other is never checked, which is how the fallback path rots.
+///
+/// `git --version` prints `git version 2.36.6`, with a vendor suffix on some
+/// builds — `(Apple Git-154)`, `.windows.1` — so only the first two numbers are
+/// read.
+pub fn git_version() -> (u32, u32) {
+    static VERSION: LazyLock<(u32, u32)> = LazyLock::new(|| {
+        let out = Command::new("git")
+            .arg("--version")
+            .env("LC_ALL", "C")
+            .output()
+            .expect("spawn git --version");
+        let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let field = printed
+            .split_whitespace()
+            .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))
+            .unwrap_or_else(|| panic!("no version in {printed:?}"));
+        let mut numbers = field.split('.');
+        let mut number = |what: &str| {
+            numbers
+                .next()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or_else(|| panic!("no {what} version in {printed:?}"))
+        };
+        (number("major"), number("minor"))
+    });
+    *VERSION
+}
+
+/// Whether this git has `--since-as-filter`, which arrived in **git 2.37**.
+///
+/// Below it the collector falls back to the pruning `--max-age` and records the
+/// degradation on every checkout it walks, so both the numbers and the notes a
+/// report carries depend on this.
+pub fn since_as_filter() -> bool {
+    git_version() >= (2, 37)
+}
+
+/// The problems a report carries that this git is **not** expected to produce.
+///
+/// Below 2.37 every walked checkout carries the `--since-as-filter` fallback
+/// note. It is the correct behaviour, and a test asserting "the collector found
+/// nothing wrong" cannot tell it from a regression — so the documented
+/// degradation is dropped here and everything else still fails the assertion.
+pub fn unexpected_problems(problems: &[String]) -> Vec<&String> {
+    problems
+        .iter()
+        .filter(|problem| !problem.contains("--since-as-filter"))
+        .collect()
+}
 
 /// The window the tests assert against: `T_SINCE` to now.
 pub fn window() -> Window {
@@ -273,31 +331,6 @@ impl Fixture {
         ))
     }
 
-    /// `(major, minor)` of the git these fixtures and the collector are both
-    /// running against.
-    ///
-    /// For the handful of tests whose *expected answer* depends on the version,
-    /// which is not the same thing as a test that tolerates any version: a
-    /// feature that arrived in 2.37 has two correct behaviours either side of
-    /// that line, and asserting one of them everywhere means the other is never
-    /// checked. `git --version` prints `git version 2.36.6`, with a vendor
-    /// suffix on some builds, so only the first two numbers are read.
-    pub fn git_version(&self) -> (u32, u32) {
-        let printed = self.git(&self.root, &["--version"]);
-        let field = printed
-            .split_whitespace()
-            .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))
-            .unwrap_or_else(|| panic!("no version in {printed:?}"));
-        let mut numbers = field.split('.');
-        let mut number = |what: &str| {
-            numbers
-                .next()
-                .and_then(|text| text.parse().ok())
-                .unwrap_or_else(|| panic!("no {what} version in {printed:?}"))
-        };
-        (number("major"), number("minor"))
-    }
-
     /// `git <args> | git patch-id --stable`, as `(patch id, commit)` pairs.
     ///
     /// Only `git_contract.rs` needs this: it asserts that git itself agrees
@@ -391,20 +424,40 @@ impl Fixture {
     }
 
     /// A linked worktree whose branch has never had a commit.
+    ///
+    /// Built by hand rather than with `worktree add --orphan`, which arrived in
+    /// **git 2.42** and would put a floor under the whole suite that nothing
+    /// else needs — the point of the old-git row in CI is to run these fixtures
+    /// on a git from before the features the collector gates on.
+    ///
+    /// The three things that define the state are reproduced exactly, and
+    /// verified against `--orphan` on git 2.53.0: `HEAD` is a symbolic ref to a
+    /// branch that does not exist, the per-worktree `logs/HEAD` is **absent** —
+    /// which is the only discriminator between unborn and branch-deleted, so it
+    /// is the byte that matters — and the index is the 65-byte empty one
+    /// `--orphan` leaves, not a missing file.
     pub fn unborn_worktree(&self, name: &str, branch: &str) -> PathBuf {
         let path = self.root.join(name);
+        // `--no-checkout` so the working tree is empty, as it is under
+        // `--orphan`; `--detach` because naming a branch here would create one.
         self.git(
             &self.repo,
             &[
                 "worktree",
                 "add",
                 "-q",
-                "--orphan",
-                "-b",
-                branch,
+                "--detach",
+                "--no-checkout",
                 path.to_str().unwrap(),
             ],
         );
+        let git_dir = self.git_dir(&path);
+        std::fs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))
+            .expect("point HEAD at an unborn branch");
+        // `worktree add` records the checkout it just did; an unborn branch has
+        // never been anywhere, and this file is what says so.
+        std::fs::remove_dir_all(git_dir.join("logs")).ok();
+        self.git(&path, &["read-tree", "--empty"]);
         path
     }
 

@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime};
 use standup::git::Git;
 use standup::model::Landed;
 
-use fixtures::{window, Fixture, T_IN1, T_IN2, T_IN3};
+use fixtures::{unexpected_problems, window, Fixture, T_IN1, T_IN2, T_IN3};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -464,7 +464,9 @@ fn the_full_pipeline_changes_nothing_in_the_repository() {
     // The only checkout that is *meant* to report a problem is the one whose
     // branch was deleted underneath it.
     assert!(
-        problems.iter().all(|p| p.contains("deleted underneath")),
+        unexpected_problems(&problems)
+            .iter()
+            .all(|p| p.contains("deleted underneath")),
         "the pipeline reported unexpected problems: {problems:?}"
     );
 
@@ -503,7 +505,11 @@ fn reporting_a_dirty_checkout_does_not_rewrite_its_index() {
         .expect("checkout");
     for _ in 0..3 {
         let report = git.report(&id, &window());
-        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert!(
+            unexpected_problems(&report.problems).is_empty(),
+            "{:?}",
+            report.problems
+        );
     }
     let after = fingerprint(&fixture, &worktrees);
     assert_unchanged(&before, &after);
@@ -584,7 +590,9 @@ fn a_run_is_safe_while_another_process_holds_the_index_lock() {
             .collect()
     });
     assert!(
-        problems.iter().all(|p| p.contains("deleted underneath")),
+        unexpected_problems(&problems)
+            .iter()
+            .all(|p| p.contains("deleted underneath")),
         "concurrent pipelines reported unexpected problems: {problems:?}"
     );
 
@@ -707,7 +715,7 @@ fn reporting_a_partial_clone_fetches_nothing_and_names_what_it_could_not_read() 
     // refused, and names the object it could not read; one that predates the
     // variable (2.37) is not asked for the diff at all, and names the remote it
     // declined to reach for and the reason why.
-    let refuses = fixture.git_version() >= (2, 37);
+    let refuses = fixtures::git_version() >= (2, 37);
     let named = report
         .problems
         .iter()

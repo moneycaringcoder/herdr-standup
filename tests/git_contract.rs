@@ -25,7 +25,7 @@
 #[path = "fixtures.rs"]
 mod fixtures;
 
-use fixtures::{lines, Fixture, T_IN1, T_IN2, T_OLDER, T_SINCE};
+use fixtures::{lines, since_as_filter, Fixture, T_IN1, T_IN2, T_OLDER, T_SINCE};
 
 /// The version of git these assertions were made against, for the record. Not
 /// asserted — the point of this file is to run on gits nobody has tried yet.
@@ -174,9 +174,11 @@ fn max_age_still_prunes_the_walk_and_loses_commits() {
 
 /// `--since-as-filter` exists, and applies the comparison **without** pruning.
 ///
-/// git 2.37 and newer. On anything older the collector falls back to `--max-age`
-/// and records a problem, so a failure here on an old runner is expected and
-/// tells you which half of that code path the row is exercising.
+/// git 2.37 and newer. Below that the contract is the opposite one and is
+/// asserted as such: git *rejects* the flag, which is what sends the collector
+/// down the `--max-age` fallback and makes it record the degradation. Asserting
+/// only the modern half would leave the old-git row failing on a difference it
+/// exists to cover.
 #[test]
 fn since_as_filter_exists_and_does_not_prune() {
     let fixture = Fixture::new("contract-filtering");
@@ -190,13 +192,31 @@ fn since_as_filter_exists_and_does_not_prune() {
             "--format=%s",
         ],
     );
+
+    if !since_as_filter() {
+        assert_ne!(
+            code,
+            0,
+            "git {} accepts --since-as-filter, but its version says it should not. \
+             `fixtures::since_as_filter` and the collector's fallback both key off \
+             2.37; one of the two is now wrong.",
+            git_version(&fixture)
+        );
+        assert!(
+            err.contains("since-as-filter"),
+            "git {} rejects --since-as-filter without naming it (stderr: {err}). \
+             `Git::commits` detects the fallback by that word, so it would stop \
+             falling back and report an unexplained log failure instead.",
+            git_version(&fixture)
+        );
+        return;
+    }
+
     assert_eq!(
         code,
         0,
-        "git {} does not accept --since-as-filter (stderr: {err}). That is \
-         expected below git 2.37: the collector falls back to --max-age and \
-         records the degradation as a problem. Nothing to fix unless this row is \
-         meant to be a modern git.",
+        "git {} does not accept --since-as-filter (stderr: {err}), though its \
+         version says it should. One of the two is wrong.",
         git_version(&fixture)
     );
 

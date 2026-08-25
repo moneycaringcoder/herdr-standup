@@ -23,34 +23,39 @@ jobs:
       # environment disagrees, and a cancelled row tells you nothing.
       fail-fast: false
       matrix:
-        # Two OS families, two architectures, three runner images. The
-        # `*-latest` rows track whatever GitHub currently ships, so the matrix
-        # keeps covering the newest image without being edited; the pinned rows
-        # are the axes worth holding still. `macos-13` is retired and
-        # `ubuntu-22.04` is deprecating, so neither is here: a row that dies in
-        # a month is worse than no row.
+        # Two OS families, two architectures, three runner images, plus one
+        # pinned git build. The `*-latest` rows track whatever GitHub currently
+        # ships, so the matrix keeps covering the newest image without being
+        # edited; the pinned rows are the axes worth holding still. `macos-13` is
+        # retired and `ubuntu-22.04` is deprecating, so neither is here: a row
+        # that dies in a month is worse than no row.
         #
-        # Measured on the first run of this matrix: **all five rows are git
-        # 2.55.0**, including the PPA one — the images have converged on the
-        # newest stable release. So this buys OS and architecture coverage
-        # today, not git-version coverage, and the `newest git` row is here to
-        # diverge the moment a newer git ships. git 2.55 redefined
-        # `--since today` from the current instant to local midnight and no
-        # distro shipped a git new enough to have caught it in advance; this row
-        # is what makes the next one visible on the day it lands.
+        # Measured on the first run of this matrix: **all five hosted rows were
+        # git 2.55.0**, including the PPA one — the images have converged on the
+        # newest stable release. So those rows buy OS and architecture coverage,
+        # not git-version coverage, and the `newest git` row is here to diverge
+        # the moment a newer git ships. git 2.55 redefined `--since today` from
+        # the current instant to local midnight and no distro shipped a git new
+        # enough to have caught it in advance; that row is what makes the next
+        # one visible on the day it lands.
         #
-        # An *older* git is the other half, and needs a pinned build rather than
-        # a runner image: the `--since-as-filter` fallback and the pre-2.55
-        # reading of `today` are unexercised anywhere right now. Filed
-        # separately.
+        # An *older* git is the other half, and it needs a pinned build rather
+        # than a runner label: no hosted image ships one any more, and
+        # `ubuntu-22.04` — which would have been 2.34 — starts deprecating on
+        # 2026-09-17. The last row below therefore builds git 2.36.6 from source
+        # and caches it. 2.36 is the version worth holding: it is below **both**
+        # lines the collector's behaviour turns on — 2.37, which brought
+        # `--since-as-filter` and `GIT_NO_LAZY_FETCH`, and 2.55, which redefined
+        # `--since today` — so one row exercises the `--max-age` fallback, the
+        # problem it records, and the pre-2.55 reading of `today`.
         include:
           - name: ubuntu-latest
             os: ubuntu-latest
             git: distro
             # Format and clippy are platform-independent, so they run on exactly
-            # one row rather than five. This row, because it is a *required*
-            # check: a lint failure has to be able to block a merge, and it can
-            # only do that from a context the ruleset names.
+            # one row rather than all of them. This row, because it is a
+            # *required* check: a lint failure has to be able to block a merge,
+            # and it can only do that from a context the ruleset names.
             lint: true
           - name: ubuntu-latest, newest git
             os: ubuntu-latest
@@ -68,6 +73,13 @@ jobs:
           - name: macos-26
             os: macos-26
             git: distro
+          # The old end, built and cached because no image ships it. Ubuntu
+          # rather than macOS: the build needs zlib headers and a compiler this
+          # image already has.
+          - name: ubuntu-latest, git 2.36.6
+            os: ubuntu-latest
+            git: build
+            gitVersion: 2.36.6
     steps:
       - uses: actions/checkout@v7
 
@@ -77,6 +89,41 @@ jobs:
           sudo add-apt-repository -y ppa:git-core/ppa
           sudo apt-get update -qq
           sudo apt-get install -y git
+
+      # Restored by version, so the row costs one build and then nothing. A cold
+      # build is about a minute; a miss is visible in the log rather than silent.
+      - name: Cache the pinned git
+        if: matrix.git == 'build'
+        id: pinned-git
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/pinned-git
+          key: pinned-git-${{ matrix.gitVersion }}-${{ matrix.os }}
+
+      - name: Build the pinned git
+        if: matrix.git == 'build' && steps.pinned-git.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y zlib1g-dev
+          curl -fsSL -o git.tar.gz \
+            "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${{ matrix.gitVersion }}.tar.gz"
+          tar xzf git.tar.gz
+          cd "git-${{ matrix.gitVersion }}"
+          # `-std=gnu11` is load-bearing: a C23 compiler defines `unreachable`
+          # in <stddef.h>, and this git has a *function* by that name, so the
+          # build dies in reflog.c without it. Everything optional is switched
+          # off — the fixtures only ever talk to local repositories over
+          # `file://`, so no curl, no gettext, no perl, no tcl.
+          make -j"$(nproc)" prefix="$HOME/.local/pinned-git" \
+            NO_TCLTK=1 NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_CURL=1 NO_OPENSSL=1 \
+            CFLAGS="-O2 -std=gnu11" install
+
+      # After `actions/checkout`, which needs a git that can speak https, and
+      # before anything that reads a git version — including the banner below,
+      # so the log says which git the row actually ran.
+      - name: Put the pinned git first on PATH
+        if: matrix.git == 'build'
+        run: echo "$HOME/.local/pinned-git/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
@@ -99,7 +146,7 @@ jobs:
       - name: Environment
         run: |
           echo "runner:   ${{ matrix.os }} ($(uname -sm))"
-          echo "git:      $(git --version)"
+          echo "git:      $(git --version) at $(command -v git)"
           echo "rustc:    $(rustc --version)"
           echo "now:      $(date +%s) ($(date))"
           echo "--since today    -> $(git rev-parse --since=today)"
