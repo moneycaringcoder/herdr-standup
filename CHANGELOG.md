@@ -4,6 +4,56 @@ All notable changes to this project are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A **partial clone is no longer written to, or fetched from,** while reporting.
+  In a `--filter=blob:none` or treeless clone the blobs a diff needs are not in
+  the repository, and git's answer is to fetch them from the promisor remote and
+  write them into `.git/objects`. Measured on git 2.53.0 against a real blobless
+  clone: **8 object files before one `log --numstat`, 24 after** — a write to a
+  user's repository and a network call, from a plugin whose two standing
+  promises are that it does neither.
+
+  This was not new with the landing probes; `git log --numstat` has wanted the
+  same blobs since the first release. Every invocation now runs with
+  `GIT_NO_LAZY_FETCH=1`, which refuses the fetch, and the same measurement shows
+  zero objects written.
+
+  **This makes two numbers unavailable on a partial clone, where they used to
+  appear**, and someone will notice:
+
+  - **Line counts.** The commits are still reported in full — a missing blob
+    must not turn a busy day into an empty one — and the churn beside them reads
+    zero with a problem naming the object git could not read.
+  - **Merge status**, where the squash and rebase probes need a patch from the
+    trunk range that the clone does not have. It reads
+    `merge status unknown: …`, carrying git's own words, rather than
+    `not merged` — which would be a wrong answer rather than an absent one.
+
+  Everything else is unaffected: the commit list, the uncommitted counts and
+  line volume, the tracking numbers and the at-risk count all read objects the
+  checkout already has, and were measured writing nothing.
+
+  `GIT_NO_LAZY_FETCH` is itself a git 2.37 feature, and an older git ignores it:
+  measured on 2.36.6 against the same clone, with the variable set, **nine
+  object files written**, exit 0, no warning. A guarantee that depends on the
+  reader's git being new enough is not a guarantee, so below 2.37 the diff is
+  not asked for at all on a partial clone — and the note then names the remote
+  it declined to reach for, and why, since nothing was read to name. A version
+  string that cannot be parsed counts as old, because the two ways of being
+  wrong cost different things: a line count, or somebody's repository.
+
+  `tests/read_only.rs` now enforces this instead of asserting it. Its fixtures
+  had no promisor remote, so there was nothing to lazily fetch and the guarantee
+  was untestable by construction; it now builds a real blobless clone of a
+  second repository in the temp tree over `file://` with `--no-local`, so the
+  transfer runs `upload-pack` with a filter, and fingerprints the clone before
+  and after a full run. A negative control runs the same log *without*
+  `GIT_NO_LAZY_FETCH` and asserts the fingerprint catches the pack arriving, so
+  a clone that happened to be complete cannot make the test vacuous.
+
 ## [0.1.1] - 2026-08-22
 
 ### Added

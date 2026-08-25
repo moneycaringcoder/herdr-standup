@@ -22,8 +22,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use standup::git::Git;
+use standup::model::Landed;
 
-use fixtures::{window, Fixture, T_IN1, T_IN2};
+use fixtures::{window, Fixture, T_IN1, T_IN2, T_IN3};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -123,7 +124,13 @@ fn collect_paths(root: &Path, out: &mut BTreeSet<PathBuf>) {
 }
 
 fn fingerprint(fixture: &Fixture, worktrees: &[PathBuf]) -> Fingerprint {
-    let common_dir = fixture.common_dir(&fixture.repo);
+    fingerprint_of(fixture, &fixture.repo, worktrees)
+}
+
+/// The same, for a repository that is not the fixture's primary one — the
+/// partial clone is its own repository with its own object store.
+fn fingerprint_of(fixture: &Fixture, repo: &Path, worktrees: &[PathBuf]) -> Fingerprint {
+    let common_dir = fixture.common_dir(repo);
     let objects = common_dir.join("objects");
 
     let mut files = BTreeMap::new();
@@ -165,16 +172,16 @@ fn fingerprint(fixture: &Fixture, worktrees: &[PathBuf]) -> Fingerprint {
     }
 
     let mut refs = fixture.git(
-        &fixture.repo,
+        repo,
         &[
             "for-each-ref",
             "--format=%(refname) %(objectname) %(objecttype)",
         ],
     );
     refs.push('\n');
-    refs.push_str(&fixture.git(&fixture.repo, &["worktree", "list", "--porcelain"]));
+    refs.push_str(&fixture.git(repo, &["worktree", "list", "--porcelain"]));
 
-    let config = fixture.git(&fixture.repo, &["config", "--list", "--local"]);
+    let config = fixture.git(repo, &["config", "--list", "--local"]);
 
     let mut reflogs = BTreeMap::new();
     let mut reflog_locks = BTreeSet::new();
@@ -639,6 +646,147 @@ fn the_fingerprint_catches_the_writeback_that_no_optional_locks_prevents() {
         "the fingerprint did not notice git rewriting the index, so the read-only test above \
          proves nothing"
     );
+}
+
+/// The other half of the promise, and the one the fixtures above cannot make: a
+/// repository standup does not write to may still be one git *fills in*.
+///
+/// A blobless clone has the commits and the trees and almost none of the blobs.
+/// A `--numstat` needs them, and git's default answer is to fetch them from the
+/// promisor remote and write them into the object store — measured on git 2.53.0
+/// as 8 object files becoming 24, from a plugin that promises neither a write nor
+/// a network call. `GIT_NO_LAZY_FETCH=1` refuses, and this pins all three halves
+/// of that: nothing is written, the commits survive without their line counts,
+/// and the object git could not read is named.
+#[test]
+fn reporting_a_partial_clone_fetches_nothing_and_names_what_it_could_not_read() {
+    let _serialised = scratch_guard();
+    let fixture = Fixture::new("promisor");
+    // A file rewritten twice: the superseded versions of it are what the clone
+    // does not have.
+    fixture.commits_around_the_window();
+    // And a squash-merged branch, so the landing probes go past
+    // `merge-base --is-ancestor` to their `log -p` over the trunk range.
+    fixture.squash_merged_worktree("squashed", "squashed");
+    // The trunk then moves on over a file it already had, **twice**, which is
+    // what leaves a superseded blob inside that range and in neither tip tree:
+    // the clone fetches the blobs of the two commits it checks out, and the
+    // middle version belongs to neither. Without the second rewrite the probes
+    // read only trees the clone already has, and answer.
+    fixture.write(&fixture.repo, "inside.txt", "one\nTWO\nthree\nfour\n");
+    fixture.commit_all_at(&fixture.repo, T_IN3, "the trunk moves on");
+    fixture.write(&fixture.repo, "inside.txt", "one\nTWO\nthree\nfour\nfive\n");
+    fixture.commit_all_at(&fixture.repo, T_IN3 + 60, "and moves on again");
+    let clone = fixture.promisor_clone("blobless", "squashed");
+    let worktrees = vec![clone.clone()];
+
+    let git = Git::new(TIMEOUT);
+    let before = fingerprint_of(&fixture, &clone, &worktrees);
+    let id = git
+        .identify(&clone)
+        .expect("git ran")
+        .expect("the clone is a checkout");
+    let report = git.report(&id, &window());
+    let after = fingerprint_of(&fixture, &clone, &worktrees);
+    assert_unchanged(&before, &after);
+
+    // The commits are the part that needs no blobs, and losing them would turn a
+    // missing line count into a day that reads as empty.
+    assert!(
+        !report.commits.is_empty(),
+        "a partial clone still has its commits: {report:?}"
+    );
+    assert!(
+        report.churn.is_zero(),
+        "the line counts cannot be read without the blobs: {:?}",
+        report.churn
+    );
+
+    // Which sentence a reader gets depends on the git in front of them, and both
+    // are honest. A git that honours `GIT_NO_LAZY_FETCH` asks for the diff, is
+    // refused, and names the object it could not read; one that predates the
+    // variable (2.37) is not asked for the diff at all, and names the remote it
+    // declined to reach for and the reason why.
+    let refuses = fixture.git_version() >= (2, 37);
+    let named = report
+        .problems
+        .iter()
+        .find(|problem| problem.contains("partial clone"))
+        .unwrap_or_else(|| {
+            panic!(
+                "a partial clone must say what it could not read: {:?}",
+                report.problems
+            )
+        });
+    if refuses {
+        assert!(
+            names_an_object(named),
+            "the problem has to name the object, not just the category: {named}"
+        );
+    } else {
+        assert!(
+            named.contains("GIT_NO_LAZY_FETCH") && named.contains("partial clone of origin"),
+            "an old git has to say which remote it refused to reach for, and why: {named}"
+        );
+    }
+
+    // And the merge status, which the same missing blobs make unanswerable.
+    // "I could not find out" is not "this did not land".
+    match &report.landed {
+        Landed::Unknown { reason } if refuses => assert!(
+            names_an_object(reason),
+            "the unknown verdict has to say which object it could not read: {reason}"
+        ),
+        Landed::Unknown { reason } => assert!(
+            reason.contains("GIT_NO_LAZY_FETCH"),
+            "the unknown verdict has to say why the probes did not run: {reason}"
+        ),
+        other => panic!("a probe that could not read the trunk is not an answer: {other:?}"),
+    }
+}
+
+/// The negative control for the test above: proof that the fixture has something
+/// to fetch and that the fingerprint sees it arrive.
+///
+/// Without this, a clone that happened to be complete — a filter the server
+/// refused, a git that fetched everything anyway — would satisfy every assertion
+/// above by doing nothing. The same log the collector runs, without
+/// `GIT_NO_LAZY_FETCH`, writes a pack into the user's repository.
+#[test]
+fn the_fingerprint_catches_the_promisor_fetch_that_no_lazy_fetch_refuses() {
+    let _serialised = scratch_guard();
+    let fixture = Fixture::new("promisor-control");
+    fixture.commits_around_the_window();
+    fixture.squash_merged_worktree("squashed", "squashed");
+    let clone = fixture.promisor_clone("blobless", "squashed");
+    let worktrees = vec![clone.clone()];
+
+    let before = fingerprint_of(&fixture, &clone, &worktrees);
+    // The fixture's own git runs without GIT_NO_LAZY_FETCH, which is exactly
+    // what standup used to do.
+    fixture.git(&clone, &["log", "--numstat", "--format=%H"]);
+    let after = fingerprint_of(&fixture, &clone, &worktrees);
+
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_unchanged(&before, &after)
+    }));
+    std::panic::set_hook(previous);
+
+    assert!(
+        caught.is_err(),
+        "nothing was fetched into the clone, so the fixture is complete and the test above \
+         proves nothing"
+    );
+}
+
+/// Whether a problem string carries a full object id, which is what makes it
+/// actionable: a reader can run `git cat-file -p <oid>` and see for themselves.
+fn names_an_object(problem: &str) -> bool {
+    problem
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .any(|word| word.len() == 40 || word.len() == 64)
 }
 
 /// Reaps the lock-holding processes even when an assertion above panics, so a

@@ -19,6 +19,7 @@ categorically worse than a bug that prints a wrong number.
 So any change touching `src/git.rs` must keep these true:
 
 - every git invocation passes `--no-optional-locks`
+- every git invocation runs with `GIT_NO_LAZY_FETCH=1`
 - nothing is ever staged, and `GIT_INDEX_FILE` is never pointed at a real index
 - no command creates an object, mutates a ref, or touches the working tree
 
@@ -28,6 +29,18 @@ takes `index.lock` — whenever a tracked file's stat data is stale. The
 `--shortstat` calls run against a copy of the index for exactly this reason. If
 you add a `diff`, it needs the same treatment. `docs/git-plumbing.md` has the
 measurement.
+
+A second one that is not obvious: **reading a partial clone writes to it.** A
+`--filter=blob:none` clone has no blobs for the diff, and git fetches the
+missing ones from the promisor remote and stores them — measured as 8 object
+files becoming 24, from one `log --numstat`. `GIT_NO_LAZY_FETCH=1` refuses that,
+at the cost of the line counts and the merge status on such a clone, which are
+then reported as unavailable and never as zero or `not merged`.
+
+`GIT_NO_LAZY_FETCH` arrived in git 2.37 and an older git ignores it, so on such
+a git the diff must not be asked for at all rather than set-and-hope. That is
+what `Git::unrefusable_promisor` is for, and why `commits` and `landing` both
+take it.
 
 `tests/read_only.rs` enforces it by fingerprinting the index bytes, working
 tree, refs, reflogs and object count before and after a full run. If your change
