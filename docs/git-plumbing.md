@@ -18,6 +18,9 @@ with the experiment that produced them.
    locale.
 5. Resolve the `git` binary explicitly. herdr runs plugin commands with **no
    shell and a minimal `PATH`**.
+6. Set `GIT_NO_LAZY_FETCH=1`. A partial clone fetches its missing objects on
+   demand, which writes into the object store and reaches the network. See
+   below.
 
 ## The flag does not cover `diff`
 
@@ -50,6 +53,40 @@ the one sanctioned use of `GIT_INDEX_FILE` in the crate.
 This was missed for a while because `tests/read_only.rs` freshened the stat cache
 before fingerprinting, and a fresh cache is exactly the state in which the
 writeback does not happen. The test now makes the cache **stale** on purpose.
+
+## A partial clone is filled in by reading it
+
+`--filter=blob:none` clones the commits and the trees and almost none of the
+blobs. A diff needs blobs, and a missing one is not an error: git fetches it from
+the promisor remote and writes it into `.git/objects`.
+
+Measured on git 2.53.0 against a blobless clone of a repository whose history
+rewrites the same file, counting files under `.git/objects`:
+
+```
+                                                        objects   stderr
+git log --numstat -z --no-renames --format=…                8 -> 24   (silent)
+GIT_NO_LAZY_FETCH=1 the same command                        8 -> 8    exit 128
+  warning: lazy fetching disabled; some objects may not be available
+  fatal: could not fetch e3169e47… from promisor remote
+```
+
+So the environment variable is on every invocation, and the failure is reported
+with git's own words: it names the object, which is what makes it checkable.
+
+What fails, on the same clone:
+
+- `log --numstat` and `log -p` over a trunk range — the churn and the squash and
+  rebase probes. `Git::commits` reads the log again **without** `--numstat`, so
+  the commits survive without their line counts; the probes have no such
+  fallback and the verdict becomes `Landed::Unknown`.
+- `git cherry` when the patch it hashes needs a blob that is not there. It
+  succeeded on the measured clone, whose two checked-out trees happened to carry
+  every blob it wanted; that is a property of the fixture, not a guarantee.
+
+What does not fail: `status --porcelain=v2`, both `diff --shortstat`
+invocations, `merge-base`, `rev-list --count` and `rev-parse`. They read the
+checkout's own trees and index, which a partial clone has.
 
 ## Repo identity
 

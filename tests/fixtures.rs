@@ -109,6 +109,12 @@ impl Fixture {
     pub fn init_repo(&self, path: &Path) {
         std::fs::create_dir_all(path).expect("create repo dir");
         self.git(path, &["init", "-q", "-b", "main"]);
+        self.configure_repo(path);
+    }
+
+    /// The configuration every fixture repository gets, whether it was created
+    /// by `init` or by `clone`.
+    pub fn configure_repo(&self, path: &Path) {
         // Local config only, so a runner with no identity still commits.
         self.git(path, &["config", "user.email", "fixture@example.invalid"]);
         self.git(path, &["config", "user.name", "standup fixture"]);
@@ -546,6 +552,55 @@ impl Fixture {
                 "refs/remotes/origin/main",
             ],
         );
+    }
+
+    /// A **blobless partial clone** of the primary repository, checked out on a
+    /// local branch of `branch` and left tracking `origin/<branch>`.
+    ///
+    /// The one fixture here with a real promisor remote, which is the only way
+    /// to exercise the objects a repository does *not* have. Everything else in
+    /// this file is either a plain repository or one with hand-made
+    /// remote-tracking refs ([`Fixture::fake_origin`]), and neither can be
+    /// lazily filled in — so `tests/read_only.rs` could assert that standup
+    /// writes nothing without ever putting it to the test.
+    ///
+    /// The remote is another directory in the same temp tree, reached over
+    /// `file://` with `--no-local` so the transfer really runs `upload-pack`
+    /// with a filter rather than hardlinking the object store. Nothing leaves
+    /// the machine, and `uploadpack.allowFilter` on the source is what makes the
+    /// filter legal.
+    ///
+    /// What ends up missing is the point: `--filter=blob:none` fetches no blobs,
+    /// and the checkouts below then fetch exactly the ones the working tree
+    /// needs. Every *superseded* version of a file — anything a diff of an
+    /// earlier commit would need — stays absent, which is what a `--numstat`
+    /// over a window and a `log -p` over a trunk range both walk into. Build the
+    /// history with a file that gets rewritten, or there is nothing to miss.
+    pub fn promisor_clone(&self, name: &str, branch: &str) -> PathBuf {
+        // Without this the server refuses the filter and the clone is complete,
+        // which would make every assertion about missing objects vacuous.
+        self.git(&self.repo, &["config", "uploadpack.allowFilter", "true"]);
+
+        let path = self.root.join(name);
+        self.git(
+            &self.root,
+            &[
+                "clone",
+                "-q",
+                "--filter=blob:none",
+                // `file://` alone is still a local transport, and a local clone
+                // hardlinks the whole object store — filter and all.
+                "--no-local",
+                &format!("file://{}", self.repo.display()),
+                path.to_str().expect("clone path is utf-8"),
+            ],
+        );
+        self.configure_repo(&path);
+        self.git(
+            &path,
+            &["switch", "-q", "-c", branch, &format!("origin/{branch}")],
+        );
+        path
     }
 
     /// Publishes `branch` as `origin/<branch>` at the given revision, and points

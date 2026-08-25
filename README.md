@@ -453,6 +453,15 @@ holds `index.lock`. It also carries a **negative control**: a sixth check runs a
 quietly stop testing anything. That distinction is measurable — plain `status` advances the index
 mtime while leaving its byte length identical, which is why mtime is fingerprinted separately.
 
+**A partial clone is neither filled in nor fetched from.** In a `--filter=blob:none` or treeless
+clone the blobs a diff needs are not in the repository, and git's own answer is to fetch them from
+the promisor remote and write them into `.git/objects` — measured on git 2.53.0 as 8 object files
+becoming 24, from one `log --numstat`. Every invocation runs with `GIT_NO_LAZY_FETCH=1`, which
+refuses that, so **two numbers are unavailable on a partial clone**: the line counts, where the
+commits are still reported in full and the churn reads zero with a problem naming the object git
+could not read, and the merge status, which reads `merge status unknown: …` rather than `not merged`.
+An absent answer, loudly, instead of a wrong one quietly — and instead of a write.
+
 There are also **no network calls at all** — no GitHub API, no telemetry, no update check. The digest
 works on a plane.
 
