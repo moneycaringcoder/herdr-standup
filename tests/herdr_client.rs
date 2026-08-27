@@ -31,8 +31,8 @@ use standup::model::WorkspaceRef;
 
 /// An anonymised `herdr api snapshot` response, structurally identical to the
 /// live capture it was made from. Stored pretty-printed so it can be reviewed;
-/// re-serialised onto one line before it goes on the wire, which changes the
-/// whitespace and nothing else.
+/// re-serialised onto one line before it goes on the wire. Only the envelope id
+/// is replaced, because it is request-specific and must echo the client's id.
 const CAPTURE: &str = include_str!("snapshots/session_snapshot.json");
 
 /// The `foreground_cwd` of two panes in the capture, both of which had a real
@@ -52,12 +52,24 @@ fn captured() -> Value {
 
 /// The whole response envelope, framed as one line the way herdr frames it.
 fn captured_line() -> String {
-    serde_json::to_string(&captured()).expect("re-serialise")
+    let mut capture = captured();
+    capture["id"] = json!("standup:1");
+    serde_json::to_string(&capture).expect("re-serialise")
 }
 
 /// Just the inner snapshot object, for driving `reduce_snapshot` with no socket.
 fn captured_snapshot() -> Value {
     captured()["result"]["snapshot"].clone()
+}
+
+/// Drives the public reducer with a complete result while keeping mutation
+/// tests focused on the inner snapshot they are exercising.
+fn reduce(snapshot: &Value) -> Vec<WorkspaceRef> {
+    reduce_snapshot(&json!({
+        "type": "session_snapshot",
+        "snapshot": snapshot,
+    }))
+    .expect("valid session.snapshot result")
 }
 
 fn workspace<'a>(workspaces: &'a [WorkspaceRef], id: &str) -> &'a WorkspaceRef {
@@ -228,6 +240,29 @@ fn parse_framed(raw: &str) -> Value {
     serde_json::from_str(raw.trim_end()).expect("request is JSON")
 }
 
+/// Sends one invalid response followed by a valid response that would hide an
+/// incorrect retry. Requiring an error also proves the invalid shape was not
+/// reduced to an ordinary empty session.
+fn contract_error(response: Value) -> String {
+    let server = TestServer::start(vec![Reply::Line(response.to_string()), captured_reply()]);
+    let mut client = server.client();
+
+    let err = client
+        .workspaces()
+        .expect_err("an invalid response contract must fail");
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "response-contract failures must not be retried"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("invalid herdr response contract"),
+        "the failure must be named: {message}"
+    );
+    message
+}
+
 // ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
@@ -323,7 +358,7 @@ fn an_error_envelope_is_a_typed_error_and_is_never_retried() {
 }
 
 #[test]
-fn a_malformed_line_is_a_transport_failure_and_is_retried() {
+fn a_malformed_line_is_a_contract_failure_and_is_not_retried() {
     let _guard = env_lock();
     let server = TestServer::start(vec![
         Reply::Line("{\"id\": \"standup:1\", \"result\":".to_string()),
@@ -331,41 +366,58 @@ fn a_malformed_line_is_a_transport_failure_and_is_retried() {
     ]);
     let mut client = server.client();
 
-    let workspaces = client.workspaces().expect("the retry should succeed");
+    let err = client
+        .workspaces()
+        .expect_err("malformed JSON is not a transport failure");
 
-    assert_eq!(workspaces.len(), 10);
-    assert_eq!(server.requests().len(), 2);
-}
-
-#[test]
-fn two_malformed_lines_fail_and_say_so() {
-    let _guard = env_lock();
-    let garbage = Reply::Line("not json at all".to_string());
-    let server = TestServer::start(vec![garbage.clone(), garbage]);
-    let mut client = server.client();
-
-    let err = client.workspaces().expect_err("both attempts are unusable");
-
-    assert!(
-        err.to_string().contains("malformed"),
-        "the message must name the problem: {err}"
-    );
+    assert!(err.to_string().contains("malformed JSON"), "{err}");
+    assert_eq!(server.requests().len(), 1);
     assert_eq!(error_code(&*err), None);
 }
 
 #[test]
-fn a_response_with_neither_result_nor_error_is_a_transport_failure() {
+fn a_response_with_neither_result_nor_error_is_a_contract_failure() {
     let _guard = env_lock();
-    let empty = Reply::Line(json!({"id": "standup:1"}).to_string());
-    let server = TestServer::start(vec![empty.clone(), empty]);
-    let mut client = server.client();
-
-    let err = client.workspaces().expect_err("nothing usable came back");
+    let message = contract_error(json!({"id": "standup:1"}));
 
     assert!(
-        err.to_string().contains("neither result nor error"),
-        "{err}"
+        message.contains("neither `result` nor `error`"),
+        "{message}"
     );
+}
+
+#[test]
+fn response_id_must_be_present_string_and_exact_before_payload_is_read() {
+    let _guard = env_lock();
+    let valid_result = captured()["result"].clone();
+    let cases = [
+        (
+            "missing",
+            json!({"result": valid_result.clone()}),
+            "missing required string `id`",
+        ),
+        (
+            "non-string",
+            json!({"id": 1, "result": valid_result.clone()}),
+            "`id` must be a string",
+        ),
+        (
+            "mismatched",
+            json!({
+                "id": "some-other-request",
+                "error": {"code": "unknown_method", "message": "must not be interpreted"}
+            }),
+            "`id` did not match request `id`",
+        ),
+    ];
+
+    for (case, response, expected) in cases {
+        let message = contract_error(response);
+        assert!(
+            message.contains(expected),
+            "{case} response id was not named: {message}"
+        );
+    }
 }
 
 /// The regression test for an out-of-memory kill. The framing is
@@ -460,7 +512,7 @@ fn notify_sends_title_and_body() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_live_capture_is_read_through_the_nested_snapshot_object() {
+fn the_live_0_8_0_capture_is_read_through_the_nested_snapshot_object() {
     let _guard = env_lock();
     let server = TestServer::start(vec![captured_reply()]);
     let mut client = server.client();
@@ -479,6 +531,72 @@ fn the_live_capture_is_read_through_the_nested_snapshot_object() {
 }
 
 #[test]
+fn stable_0_8_2_snapshot_metadata_is_shape_compatible() {
+    let _guard = env_lock();
+    // Live 0.8.2 snapshot JSON reports protocol 20. Herdr's wire protocol 21
+    // is a separate client/server compatibility number, not this field.
+    let server = TestServer::start(vec![Reply::Line(
+        json!({
+            "id": "standup:1",
+            "result": {
+                "type": "session_snapshot",
+                "snapshot": {
+                    "version": "0.8.2",
+                    "protocol": 20,
+                    "workspaces": [],
+                    "panes": [],
+                    "agents": []
+                }
+            }
+        })
+        .to_string(),
+    )]);
+    let mut client = server.client();
+
+    let workspaces = client.workspaces().expect("0.8.2-compatible shape");
+
+    assert!(workspaces.is_empty());
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn session_snapshot_result_type_is_required_and_exact() {
+    let _guard = env_lock();
+
+    for (case, replacement, available) in [
+        ("missing", None, "result type missing"),
+        (
+            "wrong",
+            Some(json!("other_result")),
+            "result type `other_result`",
+        ),
+    ] {
+        let mut result = captured()["result"].clone();
+        match replacement {
+            Some(value) => result["type"] = value,
+            None => {
+                result
+                    .as_object_mut()
+                    .expect("result object")
+                    .remove("type");
+            }
+        }
+
+        let message = contract_error(json!({"id": "standup:1", "result": result}));
+        assert!(message.contains("`session_snapshot`"), "{case}: {message}");
+        assert!(message.contains(available), "{case}: {message}");
+        assert!(
+            message.contains("snapshot version `0.8.0`"),
+            "{case}: {message}"
+        );
+        assert!(
+            message.contains("snapshot protocol `19`"),
+            "{case}: {message}"
+        );
+    }
+}
+
+#[test]
 fn a_result_without_the_snapshot_key_is_an_error_not_an_idle_session() {
     let _guard = env_lock();
     // The arrays are present, but hoisted to the level a buggy client would
@@ -489,40 +607,57 @@ fn a_result_without_the_snapshot_key_is_an_error_not_an_idle_session() {
         result["type"] = json!("session_snapshot");
         result
     };
-    let server = TestServer::start(vec![Reply::Line(
-        json!({"id": "standup:1", "result": flattened}).to_string(),
-    )]);
-    let mut client = server.client();
 
-    let err = client
-        .workspaces()
-        .expect_err("a missing `snapshot` object must not read as an idle session");
+    let message = contract_error(json!({"id": "standup:1", "result": flattened}));
 
+    assert!(message.contains("`snapshot`"), "{message}");
     assert!(
-        err.to_string().contains("snapshot"),
-        "the message must name what is missing: {err}"
+        message.contains("result type `session_snapshot`"),
+        "{message}"
     );
-    assert!(
-        err.to_string().contains("session_snapshot"),
-        "the message must name the result type it did get: {err}"
-    );
+    assert!(message.contains("snapshot version missing"), "{message}");
+    assert!(message.contains("snapshot protocol missing"), "{message}");
 }
 
 #[test]
 fn a_snapshot_that_is_not_an_object_is_an_error_too() {
     let _guard = env_lock();
-    let server = TestServer::start(vec![Reply::Line(
-        json!({
-            "id": "standup:1",
-            "result": {"type": "session_snapshot", "snapshot": []}
-        })
-        .to_string(),
-    )]);
-    let mut client = server.client();
+    let message = contract_error(json!({
+        "id": "standup:1",
+        "result": {"type": "session_snapshot", "snapshot": []}
+    }));
 
-    let err = client.workspaces().expect_err("an array is not a snapshot");
+    assert!(
+        message.contains("`snapshot` must be an object"),
+        "{message}"
+    );
+}
 
-    assert!(err.to_string().contains("snapshot"), "{err}");
+#[test]
+fn workspaces_panes_and_agents_are_required_arrays() {
+    let _guard = env_lock();
+
+    for field in ["workspaces", "panes", "agents"] {
+        let mut missing = captured()["result"].clone();
+        missing["snapshot"]
+            .as_object_mut()
+            .expect("snapshot object")
+            .remove(field);
+        let message = contract_error(json!({"id": "standup:1", "result": missing}));
+        assert!(message.contains(&format!("snapshot.{field}")), "{message}");
+        assert!(message.contains("snapshot version `0.8.0`"), "{message}");
+        assert!(message.contains("snapshot protocol `19`"), "{message}");
+
+        let mut wrong = captured()["result"].clone();
+        wrong["snapshot"][field] = json!({});
+        let message = contract_error(json!({"id": "standup:1", "result": wrong}));
+        assert!(message.contains(&format!("snapshot.{field}")), "{message}");
+        assert!(message.contains("must be an array"), "{message}");
+        assert!(
+            message.contains("result type `session_snapshot`"),
+            "{message}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -550,7 +685,7 @@ fn most_of_the_captured_workspaces_have_no_worktree_key_at_all() {
 
 #[test]
 fn a_workspace_with_no_worktree_key_still_reports_its_pane_cwd() {
-    let workspaces = reduce_snapshot(&captured_snapshot());
+    let workspaces = reduce(&captured_snapshot());
 
     // Five of the untracked workspaces are ordinary git checkouts.
     for (id, path) in [
@@ -570,7 +705,7 @@ fn a_workspace_with_no_worktree_key_still_reports_its_pane_cwd() {
 
 #[test]
 fn the_tracked_checkout_comes_first_and_duplicate_pane_cwds_collapse() {
-    let workspaces = reduce_snapshot(&captured_snapshot());
+    let workspaces = reduce(&captured_snapshot());
 
     // Two panes, both sitting in the workspace's own linked worktree: the
     // checkout path and both cwds are the same directory, and it is listed once.
@@ -593,7 +728,7 @@ fn a_tracked_checkout_is_listed_before_a_pane_that_wandered_elsewhere() {
     let mut snapshot = captured_snapshot();
     snapshot["panes"][3]["cwd"] = json!("/home/dev/code/orchard");
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
     let tracked = workspace(&workspaces, "wE");
 
     assert_eq!(
@@ -608,7 +743,7 @@ fn a_tracked_checkout_is_listed_before_a_pane_that_wandered_elsewhere() {
 
 #[test]
 fn foreground_cwd_is_never_used() {
-    let workspaces = reduce_snapshot(&captured_snapshot());
+    let workspaces = reduce(&captured_snapshot());
 
     for workspace in &workspaces {
         for path in &workspace.paths {
@@ -638,7 +773,7 @@ fn a_workspace_with_nowhere_to_look_is_dropped() {
     // herdr reports absent context as an empty string, not as a missing key.
     snapshot["panes"][0]["cwd"] = json!("");
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
 
     assert_eq!(workspaces.len(), 9);
     assert!(workspaces.iter().all(|w| w.workspace_id != "wM"));
@@ -650,7 +785,7 @@ fn a_dot_component_in_a_reported_path_is_dropped() {
     let mut snapshot = captured_snapshot();
     snapshot["panes"][7]["cwd"] = json!("/home/dev/code/atlas/.");
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
 
     assert_eq!(
         workspace(&workspaces, "w15").paths,
@@ -674,7 +809,7 @@ fn a_deleted_cwd_does_not_become_a_second_directory() {
     snapshot["panes"][4]["cwd"] =
         json!("/home/dev/.herdr/worktrees/orchard/fix-slow-fetch (deleted)");
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
 
     assert_eq!(
         workspace(&workspaces, "wE").paths,
@@ -694,7 +829,7 @@ fn a_deleted_cwd_is_still_reported_when_it_is_the_only_thing_there_is() {
         snapshot["panes"][pane]["cwd"] = json!("/home/dev/code/atlas (deleted)");
     }
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
 
     assert_eq!(
         workspace(&workspaces, "w15").paths,
@@ -708,7 +843,7 @@ fn a_deleted_cwd_is_still_reported_when_it_is_the_only_thing_there_is() {
 
 #[test]
 fn agent_session_value_is_read_out_of_the_object() {
-    let workspaces = reduce_snapshot(&captured_snapshot());
+    let workspaces = reduce(&captured_snapshot());
     let atlas = workspace(&workspaces, "w15");
 
     let classifier = &atlas.agents[1];
@@ -725,7 +860,7 @@ fn agent_session_value_is_read_out_of_the_object() {
 
 #[test]
 fn an_agent_the_user_never_named_still_reports_its_program() {
-    let workspaces = reduce_snapshot(&captured_snapshot());
+    let workspaces = reduce(&captured_snapshot());
     let overview = workspace(&workspaces, "wM");
 
     assert_eq!(overview.agents.len(), 1);
@@ -737,7 +872,7 @@ fn an_agent_the_user_never_named_still_reports_its_program() {
 
 #[test]
 fn an_agent_with_no_session_reports_none_rather_than_a_placeholder() {
-    let workspaces = reduce_snapshot(&captured_snapshot());
+    let workspaces = reduce(&captured_snapshot());
     let fetch = workspace(&workspaces, "wE");
 
     let opencode = &fetch.agents[0];
@@ -752,7 +887,7 @@ fn an_agent_with_no_session_reports_none_rather_than_a_placeholder() {
 
 #[test]
 fn a_pane_with_no_agent_is_not_counted_as_one() {
-    let workspaces = reduce_snapshot(&captured_snapshot());
+    let workspaces = reduce(&captured_snapshot());
     let cobalt = workspace(&workspaces, "w1B");
 
     // Two panes, one of them an empty shell with `agent_status: unknown`.
@@ -773,7 +908,7 @@ fn a_pane_with_an_agent_but_no_agents_row_still_counts() {
         .collect();
     snapshot["agents"] = Value::Array(agents);
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
     let atlas = workspace(&workspaces, "w15");
 
     assert_eq!(atlas.agents.len(), 4, "the agent still ran");
@@ -794,7 +929,7 @@ fn agents_are_ordered_by_pane_so_the_digest_is_stable() {
     agents.reverse();
     snapshot["agents"] = Value::Array(agents);
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
 
     assert_eq!(
         workspace(&workspaces, "w15")
@@ -812,7 +947,7 @@ fn every_captured_agent_lands_in_exactly_one_workspace() {
     let snapshot = captured_snapshot();
     let rows = snapshot["agents"].as_array().expect("agents").len();
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
     let mut seen: Vec<String> = workspaces
         .iter()
         .flat_map(|w| w.agents.iter().map(|a| a.pane_id.clone()))
@@ -831,7 +966,7 @@ fn every_captured_agent_lands_in_exactly_one_workspace() {
 /// here" a fact instead of an inference from the workspace it belongs to.
 #[test]
 fn every_captured_agent_carries_the_directory_it_worked_in() {
-    let workspaces = reduce_snapshot(&captured_snapshot());
+    let workspaces = reduce(&captured_snapshot());
     let atlas = workspace(&workspaces, "w15");
 
     assert_eq!(atlas.agents.len(), 4);
@@ -857,7 +992,7 @@ fn an_agent_row_with_no_cwd_falls_back_to_its_pane() {
         }
     }
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
     let agent = &workspace(&workspaces, "w15").agents[1];
 
     assert_eq!(agent.pane_id, "w15:p2");
@@ -884,7 +1019,7 @@ fn an_agent_with_no_directory_anywhere_reports_none() {
         }
     }
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
     let agent = &workspace(&workspaces, "w15").agents[1];
 
     assert_eq!(agent.pane_id, "w15:p2");
@@ -911,7 +1046,7 @@ fn a_workspace_can_straddle_two_directories_and_each_agent_keeps_its_own() {
         }
     }
 
-    let workspaces = reduce_snapshot(&snapshot);
+    let workspaces = reduce(&snapshot);
     let atlas = workspace(&workspaces, "w15");
 
     assert_eq!(

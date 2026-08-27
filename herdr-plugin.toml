@@ -12,12 +12,12 @@
 id = "moneycaringcoder.standup"
 name = "Standup"
 version = "0.1.1"
-# The floor is the latest stable herdr, which is also the only version this
-# plugin has ever been run against: 0.8.0 / protocol 19. Earlier servers carry
-# the fields used here — session.snapshot grew the pane `cwd` and `agents`
-# arrays in 0.7.5 — but nothing here has been exercised against one, and a
-# compatibility claim that was inferred rather than measured is not one worth
-# publishing. Lower it when someone has run the suite against an older server.
+# The supported floor stays at 0.8.0, whose protocol-19 snapshot is captured in
+# the compatibility fixture. The consumed `session_snapshot` shape was last
+# revalidated live on stable 0.8.2, whose snapshot JSON reports protocol 20.
+# Herdr's separate client/server wire protocol is 21 and does not change that
+# JSON metadata or shape. Earlier servers may carry the fields used here, but
+# lowering the measured compatibility floor would be an inferred claim.
 min_herdr_version = "0.8.0"
 description = "A daily digest of what your agents actually did, across every workspace."
 platforms = ["linux", "macos"]

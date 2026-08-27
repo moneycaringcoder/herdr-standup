@@ -2,8 +2,9 @@
 //!
 //! Newline-delimited JSON over the socket at `HERDR_SOCKET_PATH`. The server
 //! answers exactly one request per connection and then closes, so every call
-//! must be able to reconnect and retry once — that is the hot path, not an edge
-//! case, and it is also what carries the client across `herdr update --handoff`.
+//! must open a fresh connection. Transport failures are retried once to carry
+//! the client across `herdr update --handoff`; server rejections and invalid
+//! response contracts are not retried because doing so can duplicate effects.
 //!
 //! Request and response framing:
 //!
@@ -12,17 +13,18 @@
 //! success : {"id":"<string>","result":{"type":"<snake_case>",...}}\n
 //! failure : {"id":"<string>","error":{"code":"...","message":"..."}}\n
 //! ```
-//!
-//! `id` must be a string and `params` must be an object — `{}` for methods that
-//! take none, never `null`.
+//! Every response `id` must be a string exactly matching the request id.
+//! Request `params` must be an object — `{}` for methods that take none, never
+//! `null`.
 //!
 //! # What this plugin reads, and the trap in it
 //!
 //! One `session.snapshot`, and nothing else. The payload is
 //! `{"type":"session_snapshot","snapshot":{...}}` and the arrays live one level
 //! **down**, under `snapshot`; reading them off the result object yields no
-//! workspaces at all, which looks exactly like an idle session. An absent
-//! `snapshot` key is therefore an error, never an empty list.
+//! workspaces at all, which looks exactly like an idle session. The result type,
+//! snapshot object, and its `workspaces`, `panes`, and `agents` arrays are
+//! therefore required contract fields, never optional empty fallbacks.
 //!
 //! The larger trap is `workspace.worktree`. It is present only for workspaces
 //! herdr itself opened as a repository or a worktree. In a live ten-workspace
@@ -66,7 +68,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// A herdr error envelope, carried as a real error type so callers can tell a
-/// rejected request from a transport failure.
+/// rejected request from a transport or response-contract failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrError {
     pub code: String,
@@ -81,17 +83,47 @@ impl fmt::Display for HerdrError {
 
 impl std::error::Error for HerdrError {}
 
-/// Error code from a herdr error envelope, or `None` for a transport failure.
+/// Error code from a herdr error envelope, or `None` for transport and
+/// response-contract failures.
 pub fn error_code<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a str> {
     err.downcast_ref::<HerdrError>().map(|e| e.code.as_str())
 }
 
-/// Split so that only transport failures are retried. Retrying a *rejected*
-/// request would be rejected again, and would double-count against herdr's own
-/// error accounting.
+#[derive(Debug)]
+struct HerdrContractError {
+    method: String,
+    message: String,
+}
+
+impl HerdrContractError {
+    fn new(method: &str, message: impl Into<String>) -> Self {
+        Self {
+            method: method.to_string(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for HerdrContractError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid herdr response contract for {}: {}",
+            self.method, self.message
+        )
+    }
+}
+
+impl std::error::Error for HerdrContractError {}
+
+/// Split so that only transport failures are retried. A server rejection is a
+/// completed request, and a response-contract failure may also follow a
+/// completed request; retrying either could duplicate side effects.
 enum Failure {
     Transport(String),
-    Protocol(HerdrError),
+    Rejected(HerdrError),
+    Contract(HerdrContractError),
+    Request(String),
 }
 
 #[derive(Debug)]
@@ -119,20 +151,7 @@ impl Herdr {
     /// else, including non-repositories, is returned and left for git to judge.
     pub fn workspaces(&mut self) -> Result<Vec<WorkspaceRef>> {
         let result = self.call("session.snapshot", json!({}))?;
-        // The arrays live one level down, under `snapshot`. Absent is an error
-        // rather than a fallback: an empty workspace list is indistinguishable
-        // from an idle session, so a protocol change here would make the plugin
-        // quietly report nothing at all instead of failing.
-        let snapshot = result
-            .get("snapshot")
-            .filter(|snapshot| snapshot.is_object())
-            .ok_or_else(|| {
-                format!(
-                    "session.snapshot returned no `snapshot` object (result type `{}`)",
-                    text(&result, "type").unwrap_or("missing")
-                )
-            })?;
-        Ok(reduce_snapshot(snapshot))
+        reduce_snapshot(&result)
     }
 
     pub fn notify(&mut self, title: &str, body: &str) -> Result<()> {
@@ -145,15 +164,17 @@ impl Herdr {
         let id = format!("standup:{}", self.next_id);
         match self.call_once(&id, method, &params) {
             Ok(result) => Ok(result),
-            Err(Failure::Protocol(err)) => Err(Box::new(err)),
-            // One request per connection is the normal path, not an error path:
-            // the server EOFs after answering, so the connection we would reuse
-            // is already gone. The same retry carries the client across a
-            // `herdr update --handoff`, where the first attempt lands on a
-            // socket the old server has just unlinked.
+            Err(Failure::Rejected(err)) => Err(Box::new(err)),
+            Err(Failure::Contract(err)) => Err(Box::new(err)),
+            Err(Failure::Request(err)) => Err(err.into()),
+            // A dropped connection during server handoff is safe to retry:
+            // unlike a rejection or a parsed-but-invalid response, no response
+            // says that herdr completed the request.
             Err(Failure::Transport(first)) => match self.call_once(&id, method, &params) {
                 Ok(result) => Ok(result),
-                Err(Failure::Protocol(err)) => Err(Box::new(err)),
+                Err(Failure::Rejected(err)) => Err(Box::new(err)),
+                Err(Failure::Contract(err)) => Err(Box::new(err)),
+                Err(Failure::Request(err)) => Err(err.into()),
                 Err(Failure::Transport(second)) => {
                     Err(format!("{method} failed twice: {first}; on retry: {second}").into())
                 }
@@ -181,7 +202,7 @@ impl Herdr {
             "method": method,
             "params": params,
         }))
-        .map_err(|e| Failure::Transport(format!("could not encode request: {e}")))?;
+        .map_err(|e| Failure::Request(format!("could not encode request: {e}")))?;
         line.push('\n');
 
         (&stream)
@@ -220,19 +241,48 @@ impl Herdr {
             ));
         }
 
-        let value: Value = serde_json::from_str(response.trim_end())
-            .map_err(|e| Failure::Transport(format!("malformed response to {method}: {e}")))?;
+        let value: Value = serde_json::from_str(response.trim_end()).map_err(|e| {
+            Failure::Contract(HerdrContractError::new(
+                method,
+                format!("response was malformed JSON: {e}"),
+            ))
+        })?;
+
+        match value.get("id") {
+            Some(Value::String(response_id)) if response_id == id => {}
+            Some(Value::String(response_id)) => {
+                return Err(Failure::Contract(HerdrContractError::new(
+                    method,
+                    format!(
+                        "response `id` did not match request `id`: expected `{id}`, got `{response_id}`"
+                    ),
+                )));
+            }
+            Some(_) => {
+                return Err(Failure::Contract(HerdrContractError::new(
+                    method,
+                    "response `id` must be a string",
+                )));
+            }
+            None => {
+                return Err(Failure::Contract(HerdrContractError::new(
+                    method,
+                    "response is missing required string `id`",
+                )));
+            }
+        }
 
         if let Some(err) = value.get("error") {
-            return Err(Failure::Protocol(HerdrError {
+            return Err(Failure::Rejected(HerdrError {
                 code: text(err, "code").unwrap_or("unknown_error").to_string(),
                 message: text(err, "message").unwrap_or("no message").to_string(),
             }));
         }
         match value.get("result") {
             Some(result) => Ok(result.clone()),
-            None => Err(Failure::Transport(format!(
-                "response to {method} carried neither result nor error"
+            None => Err(Failure::Contract(HerdrContractError::new(
+                method,
+                "response carried neither `result` nor `error`",
             ))),
         }
     }
@@ -264,19 +314,21 @@ fn socket_path() -> Result<PathBuf> {
 // Reduction
 // ---------------------------------------------------------------------------
 
-/// Reduces a `session.snapshot` result's inner `snapshot` object to workspace
-/// references. Split out so tests can drive it from captured real output
-/// without a socket.
-pub fn reduce_snapshot(snapshot: &Value) -> Vec<WorkspaceRef> {
-    let panes = array(snapshot, "panes");
-    let agent_rows = array(snapshot, "agents");
+/// Reduces a complete `session.snapshot` result to workspace references.
+///
+/// Validation deliberately lives here rather than only in [`Herdr::workspaces`]
+/// so captured-response tests and any other direct callers cannot turn a
+/// changed or partial protocol shape into an ordinary empty session.
+pub fn reduce_snapshot(result: &Value) -> Result<Vec<WorkspaceRef>> {
+    let shape = validate_snapshot_result(result)?;
 
     let mut workspaces = Vec::new();
-    for workspace in array(snapshot, "workspaces") {
+    for workspace in shape.workspaces {
         let Some(workspace_id) = text(workspace, "workspace_id") else {
             continue;
         };
-        let here: Vec<&Value> = panes
+        let here: Vec<&Value> = shape
+            .panes
             .iter()
             .filter(|pane| text(pane, "workspace_id") == Some(workspace_id))
             .collect();
@@ -293,11 +345,80 @@ pub fn reduce_snapshot(snapshot: &Value) -> Vec<WorkspaceRef> {
             label: text(workspace, "label").unwrap_or(workspace_id).to_string(),
             number: workspace.get("number").and_then(Value::as_u64),
             paths,
-            agents: agents_of(workspace_id, agent_rows, &here),
+            agents: agents_of(workspace_id, shape.agents, &here),
             agent_status: text(workspace, "agent_status").map(str::to_string),
         });
     }
-    workspaces
+    Ok(workspaces)
+}
+
+struct SnapshotShape<'a> {
+    workspaces: &'a [Value],
+    panes: &'a [Value],
+    agents: &'a [Value],
+}
+
+fn validate_snapshot_result(
+    result: &Value,
+) -> std::result::Result<SnapshotShape<'_>, HerdrContractError> {
+    if result.get("type").and_then(Value::as_str) != Some("session_snapshot") {
+        return Err(snapshot_contract_error(
+            result,
+            "expected result `type` to be `session_snapshot`",
+        ));
+    }
+
+    let Some(snapshot) = result.get("snapshot").filter(|value| value.is_object()) else {
+        return Err(snapshot_contract_error(
+            result,
+            "required `snapshot` must be an object",
+        ));
+    };
+
+    Ok(SnapshotShape {
+        workspaces: required_snapshot_array(result, snapshot, "workspaces")?,
+        panes: required_snapshot_array(result, snapshot, "panes")?,
+        agents: required_snapshot_array(result, snapshot, "agents")?,
+    })
+}
+
+fn required_snapshot_array<'a>(
+    result: &Value,
+    snapshot: &'a Value,
+    name: &str,
+) -> std::result::Result<&'a [Value], HerdrContractError> {
+    snapshot
+        .get(name)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            snapshot_contract_error(
+                result,
+                format!("required `snapshot.{name}` must be an array"),
+            )
+        })
+}
+
+fn snapshot_contract_error(result: &Value, message: impl Into<String>) -> HerdrContractError {
+    let snapshot = result.get("snapshot");
+    HerdrContractError::new(
+        "session.snapshot",
+        format!(
+            "{}; available metadata: result type {}, snapshot version {}, snapshot protocol {}",
+            message.into(),
+            available_value(result.get("type")),
+            available_value(snapshot.and_then(|value| value.get("version"))),
+            available_value(snapshot.and_then(|value| value.get("protocol"))),
+        ),
+    )
+}
+
+fn available_value(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(value)) => format!("`{value}`"),
+        Some(value) => format!("`{value}`"),
+        None => "missing".to_string(),
+    }
 }
 
 /// The directories a workspace occupies: its tracked checkout first, when it
@@ -516,10 +637,6 @@ fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-}
-
-fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
-    value.get(key).and_then(Value::as_array).map_or(&[], |a| a)
 }
 
 #[cfg(test)]

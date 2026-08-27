@@ -57,6 +57,10 @@ All notable changes to this project are recorded here. The format follows
   the report only to the capped background-command log. All seven report
   formats remain one-shot and copyable from the pane.
 
+- Herdr responses now fail closed unless their id matches the request and a
+  `session.snapshot` carries the required workspace, pane, and agent arrays.
+  Protocol drift can no longer look like an ordinary empty session.
+
 - A **partial clone is no longer written to, or fetched from,** while reporting.
   In a `--filter=blob:none` or treeless clone the blobs a diff needs are not in
   the repository, and git's answer is to fetch them from the promisor remote and
