@@ -19,7 +19,7 @@
 //!    day.
 //! 6. **Report** each checkout, and roll up by repository.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::cache::Cache;
@@ -369,17 +369,16 @@ fn merge_checkout(
 /// reason: it is the size of a union, and it is a pure function of the path, so
 /// testing each path in the union is both cheaper and correct where adding up
 /// per-checkout counts would double a lockfile touched in two worktrees.
-fn rollup(repo: &mut RepoDigest, ignored: &Ignored) {
-    let mut seen_commits: Vec<&str> = Vec::new();
-    let mut files: Vec<&str> = Vec::new();
-    let mut days: Vec<&str> = Vec::new();
+pub(crate) fn rollup(repo: &mut RepoDigest, ignored: &Ignored) {
+    let mut seen_commits: HashSet<&str> = HashSet::new();
+    let mut files: HashSet<&str> = HashSet::new();
+    let mut days: HashSet<&str> = HashSet::new();
     let mut churn = Churn::default();
     for checkout in &repo.checkouts {
         for commit in &checkout.report.commits {
-            if seen_commits.contains(&commit.oid.as_str()) {
+            if !seen_commits.insert(&commit.oid) {
                 continue;
             }
-            seen_commits.push(&commit.oid);
             churn.insertions += commit.insertions;
             churn.deletions += commit.deletions;
             // The local date out of the rendered stamp, which is already
@@ -391,13 +390,9 @@ fn rollup(repo: &mut RepoDigest, ignored: &Ignored) {
                 .split(' ')
                 .next()
                 .unwrap_or(&commit.committed.local);
-            if !days.contains(&day) {
-                days.push(day);
-            }
+            days.insert(day);
             for file in &commit.files {
-                if !files.contains(&file.as_str()) {
-                    files.push(file);
-                }
+                files.insert(file);
             }
         }
     }
@@ -445,7 +440,7 @@ fn push_unique(list: &mut Vec<PathBuf>, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Severity;
+    use crate::model::{Commit, Dirty, Head, Landed, RepoKey, Severity, Stamp, Tracking, Unpushed};
 
     fn agent(pane: &str, name: Option<&str>, program: &str, cwd: Option<&str>) -> AgentRef {
         AgentRef {
@@ -482,6 +477,97 @@ mod tests {
             .find(|(path, _)| path == &PathBuf::from(root))
             .map(|(_, agents)| agents.iter().map(|a| a.pane_id.as_str()).collect())
             .unwrap_or_default()
+    }
+
+    fn rollup_checkout(
+        path: &str,
+        is_linked_worktree: bool,
+        commits: Vec<Commit>,
+    ) -> CheckoutDigest {
+        CheckoutDigest {
+            report: crate::model::CheckoutReport {
+                path: PathBuf::from(path),
+                repo_key: RepoKey("/repo/.git".to_string()),
+                repo_root: PathBuf::from("/repo"),
+                is_linked_worktree,
+                head: Head::Branch {
+                    name: "main".to_string(),
+                    oid: "0000000000000000000000000000000000000000".to_string(),
+                },
+                commits,
+                churn: Churn::default(),
+                dirty: Dirty::default(),
+                tracking: Tracking::NoUpstream,
+                landed: Landed::IsDefault {
+                    name: "main".to_string(),
+                },
+                unpushed: Unpushed::Commits { count: 0 },
+                problems: Vec::new(),
+            },
+            workspaces: Vec::new(),
+            agents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn large_overlapping_worktrees_roll_up_distinct_commits_files_and_days() {
+        const DISTINCT: usize = 4_096;
+        let mut commits = Vec::with_capacity(DISTINCT);
+        for index in 0..DISTINCT {
+            // Every generated date is calendar-valid and unique: limiting each
+            // month to 28 days avoids a date dependency in this deterministic
+            // fixture while still exercising thousands of day memberships.
+            let year = 2000 + index / (12 * 28);
+            let month = index / 28 % 12 + 1;
+            let day = index % 28 + 1;
+            let file = if index % 8 == 0 {
+                format!("generated/{index}/Cargo.lock")
+            } else {
+                format!("src/file-{index:04}.rs")
+            };
+            commits.push(Commit {
+                oid: format!("{index:040x}"),
+                author: "Fixture".to_string(),
+                committed: Stamp {
+                    epoch: index as i64,
+                    local: format!("{year:04}-{month:02}-{day:02} 12:00"),
+                    zone: "UTC +0000".to_string(),
+                    offset_seconds: Some(0),
+                },
+                subject: format!("Generated commit {index}"),
+                is_merge: false,
+                insertions: 2,
+                deletions: 1,
+                files: vec![file],
+            });
+        }
+
+        let mut repo = RepoDigest {
+            repo_key: RepoKey("/repo/.git".to_string()),
+            name: "repo".to_string(),
+            repo_root: PathBuf::from("/repo"),
+            checkouts: vec![
+                rollup_checkout("/repo", false, commits.clone()),
+                rollup_checkout("/repo-worktree", true, commits),
+            ],
+            commits: 0,
+            churn: Churn::default(),
+            active_days: 0,
+        };
+
+        rollup(&mut repo, &Ignored::default());
+
+        assert_eq!(repo.commits, DISTINCT);
+        assert_eq!(repo.active_days, DISTINCT);
+        assert_eq!(
+            repo.churn,
+            Churn {
+                files: DISTINCT,
+                excluded: DISTINCT / 8,
+                insertions: (DISTINCT * 2) as u64,
+                deletions: DISTINCT as u64,
+            }
+        );
     }
 
     /// The headline of #19: two agents in one window, in one checkout, are two
