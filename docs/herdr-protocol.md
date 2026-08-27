@@ -1,8 +1,11 @@
-# herdr socket notes (verified against herdr 0.8.0, protocol 19)
+# herdr socket notes (0.8.0 floor; shape revalidated on stable 0.8.2)
 
-Working notes for `src/herdr.rs`. Everything here was checked against a live
-0.8.0 server with ten workspaces and nineteen panes, not inferred from
-documentation. Only the parts standup actually depends on are covered.
+Working notes for `src/herdr.rs`. The large capture is from a live 0.8.0 server
+with ten workspaces and nineteen panes. The fields standup consumes were
+revalidated live against stable 0.8.2: its snapshot JSON reports
+`version: "0.8.2"` and `protocol: 20` with the same `session_snapshot` shape.
+Herdr's separate client/server wire protocol is 21; that is not the snapshot
+JSON's `protocol` field. Only the parts standup actually depends on are covered.
 
 ## Transport
 
@@ -20,15 +23,18 @@ success : {"id":"<string>","result":{"type":"<snake_case>",...}}\n
 failure : {"id":"<string>","error":{"code":"<string>","message":"<string>"}}\n
 ```
 
-`id` must be a string. `params` is mandatory and must be an object — send `{}`
-for methods that take no parameters, never `null`.
+The request `id` must be a string. Every response must echo that exact string;
+missing, non-string, or mismatched response ids are contract failures checked
+before either `result` or `error` is interpreted. `params` is mandatory and must
+be an object — send `{}` for methods that take no parameters, never `null`.
 
 **The socket answers one request per connection and then sends EOF.** Every call
 must be able to reconnect and retry once. That is the normal path rather than an
 error path, and it is also what carries a client across `herdr update
 --handoff`, where the first attempt lands on a socket the old server has just
-unlinked. Retry only on a transport failure; retrying a rejected request just
-gets it rejected again and double-counts against herdr's own error accounting.
+unlinked. Retry only on a transport failure. A rejected request and a parsed
+response that violates the contract are final: either may follow a completed
+request, so retrying could duplicate side effects.
 
 ## The one method standup calls
 
@@ -44,8 +50,11 @@ result.snapshot      version, protocol,
 ```
 
 **The arrays are one level down, under `snapshot`.** Reading them off `result`
-yields nothing at all, which looks exactly like an idle session. A missing
-`snapshot` key is therefore a hard error in this client, never an empty list.
+yields nothing at all, which looks exactly like an idle session. The client
+therefore requires result type `session_snapshot`, an object `snapshot`, and
+array-valued `workspaces`, `panes`, and `agents`. A missing or wrongly typed
+required field is a named compatibility error, never an empty list; its message
+includes every available result type and snapshot version/protocol value.
 
 ## The finding that shaped this plugin
 
