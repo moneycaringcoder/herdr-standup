@@ -61,6 +61,10 @@ All notable changes to this project are recorded here. The format follows
   `session.snapshot` carries the required workspace, pane, and agent arrays.
   Protocol drift can no longer look like an ordinary empty session.
 
+- Atomic plugin-state replacement now syncs the containing directory after
+  rename, so a power loss cannot discard the durable name of a completed
+  `--since-last` marker or plumbing-cache write.
+
 - A **partial clone is no longer written to, or fetched from,** while reporting.
   In a `--filter=blob:none` or treeless clone the blobs a diff needs are not in
   the repository, and git's answer is to fetch them from the promisor remote and
