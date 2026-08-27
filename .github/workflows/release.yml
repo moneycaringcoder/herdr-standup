@@ -30,7 +30,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          fetch-depth: 1
           persist-credentials: false
+
+      - name: Fetch complete main history
+        # A bounded shallow fetch cannot prove ancestry for an older release
+        # commit. Fetch the named branch explicitly and remove the checkout's
+        # shallow boundary without fetching any other tags.
+        run: >-
+          git fetch --no-tags --prune --unshallow origin
+          +refs/heads/main:refs/remotes/origin/release-main
 
       - name: Prove the identity gate can refuse
         # Before trusting the gate below, run its own boundary tests. A gate
@@ -39,9 +48,12 @@ jobs:
         run: python3 tools/test_check_release.py
 
       - name: Verify the tag against every version surface
-        # Refuses unless the tag, Cargo.toml, Cargo.lock and herdr-plugin.toml
-        # all agree, and the changelog has a dated, non-empty section for it.
-        run: python3 tools/check_release.py
+        # Refuses unless the tag commit is on fetched main; the tag, Cargo.toml,
+        # Cargo.lock and herdr-plugin.toml all agree; and the changelog has a
+        # dated, non-empty section for it.
+        run: >-
+          python3 tools/check_release.py
+          --main-ref refs/remotes/origin/release-main
 
   gate:
     name: release gate (${{ matrix.os }})
@@ -84,7 +96,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          fetch-depth: 1
           persist-credentials: false
+
+      - name: Fetch complete main history
+        # Rebuild the proof in this checkout rather than trusting prior job
+        # state. Publication remains the first operation using the write token.
+        run: >-
+          git fetch --no-tags --prune --unshallow origin
+          +refs/heads/main:refs/remotes/origin/release-main
 
       - name: Re-verify identity and collect the release notes
         # Deliberately run again rather than carrying the notes from the
@@ -92,7 +112,10 @@ jobs:
         # artifact that could be substituted between jobs, and it means the
         # notes are produced by the same checkout that is about to be
         # published from.
-        run: python3 tools/check_release.py --notes-out "$RUNNER_TEMP/notes.md"
+        run: >-
+          python3 tools/check_release.py
+          --main-ref refs/remotes/origin/release-main
+          --notes-out "$RUNNER_TEMP/notes.md"
 
       - name: Publish
         env:

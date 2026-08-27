@@ -11,11 +11,13 @@ family on release day: a tag that matched `Cargo.toml` while
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -23,6 +25,7 @@ from check_release import (  # noqa: E402
     ReleaseError,
     changelog_notes,
     check,
+    check_main_ancestry,
     check_release_context,
     resolve_tag,
 )
@@ -77,6 +80,55 @@ def build_repo(
     return directory
 
 
+def run_git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+
+
+def build_git_repository(directory: Path, *, unmerged_tag: bool = False) -> Path:
+    repository = build_repo(directory)
+    (repository / "tools" / "check_release.py").write_bytes(CHECKER.read_bytes())
+    run_git(repository, "init", "--initial-branch=main")
+    run_git(repository, "config", "--local", "user.name", "Release Gate Test")
+    run_git(repository, "config", "--local", "user.email", "release-gate@example.invalid")
+    run_git(repository, "config", "--local", "commit.gpgSign", "false")
+    run_git(repository, "config", "--local", "tag.gpgSign", "false")
+    run_git(repository, "add", ".")
+    run_git(repository, "commit", "-m", "Prepare release")
+    if unmerged_tag:
+        run_git(repository, "switch", "-c", "release")
+        (repository / "release-marker").write_text("unmerged\n", encoding="utf-8")
+        run_git(repository, "add", "release-marker")
+        run_git(repository, "commit", "-m", "Unmerged release commit")
+        run_git(repository, "tag", "v1.2.3")
+        run_git(repository, "switch", "main")
+    else:
+        run_git(repository, "tag", "v1.2.3")
+    run_git(repository, "switch", "--detach", "v1.2.3")
+    return repository
+
+
+def run_release_checker(
+    repository: Path, *arguments: str
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    for name in ("GITHUB_ACTIONS", "GITHUB_REF_NAME", "GITHUB_REF_TYPE"):
+        environment.pop(name, None)
+    return subprocess.run(
+        [sys.executable, str(repository / "tools" / "check_release.py"), *arguments],
+        cwd=repository,
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+    )
+
+
 class TagTests(unittest.TestCase):
     def test_a_well_formed_tag_is_accepted_from_either_source(self) -> None:
         self.assertEqual(resolve_tag("v1.2.3", None), "v1.2.3")
@@ -102,6 +154,57 @@ class TagTests(unittest.TestCase):
                     check_release_context(
                         "v1.2.3", github_actions=True, ref_type=ref_type, ref_name=ref_name
                     )
+
+
+class MainAncestryTests(unittest.TestCase):
+    def test_a_version_consistent_tag_on_main_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = build_git_repository(Path(directory))
+            result = run_release_checker(
+                repository, "--tag", "v1.2.3", "--main-ref", "refs/heads/main"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("release identity verified: v1.2.3", result.stdout)
+
+    def test_a_version_consistent_tag_on_an_unmerged_branch_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = build_git_repository(Path(directory), unmerged_tag=True)
+            result = run_release_checker(
+                repository, "--tag", "v1.2.3", "--main-ref", "refs/heads/main"
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("is outside main ref", result.stderr)
+
+    def test_unresolved_tag_and_main_refs_name_the_failed_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = build_git_repository(Path(directory))
+            with self.assertRaisesRegex(ReleaseError, "Git tag resolution failed.*missing-tag"):
+                check_main_ancestry(repository, "missing-tag", "refs/heads/main")
+            with self.assertRaisesRegex(ReleaseError, "Git main-ref resolution failed.*missing-main"):
+                check_main_ancestry(repository, "v1.2.3", "missing-main")
+
+    def test_an_unknown_merge_base_result_names_the_probe_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = build_git_repository(Path(directory))
+            real_run = subprocess.run
+
+            def fail_probe(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
+                if command[:3] == ["git", "merge-base", "--is-ancestor"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        128,
+                        stdout="",
+                        stderr="fatal: synthetic probe failure",
+                    )
+                return real_run(command, **kwargs)
+
+            with mock.patch("check_release.subprocess.run", side_effect=fail_probe):
+                with self.assertRaisesRegex(
+                    ReleaseError, "Git ancestry probe failed.*exit 128.*synthetic probe failure"
+                ):
+                    check_main_ancestry(repository, "v1.2.3", "refs/heads/main")
 
 
 class VersionSurfaceTests(unittest.TestCase):

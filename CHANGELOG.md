@@ -76,6 +76,10 @@ All notable changes to this project are recorded here. The format follows
   updates and keep the greatest completed epoch, so a slower older run cannot
   move the next window backwards after a newer run finishes.
 
+- Release publication now proves the tag commit is reachable from freshly
+  fetched `main`, both in the identity job and immediately before publication;
+  a version-consistent tag on an unmerged branch is refused.
+
 - A **partial clone is no longer written to, or fetched from,** while reporting.
   In a `--filter=blob:none` or treeless clone the blobs a diff needs are not in
   the repository, and git's answer is to fetch them from the promisor remote and
