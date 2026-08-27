@@ -1581,9 +1581,10 @@ impl Git {
     ///
     /// A hung git — a stuck credential helper, a stalled network filesystem, an
     /// fsmonitor that never answers — must not hang the digest, so the child is
-    /// polled and killed on expiry. The pipes are drained on their own threads:
-    /// a child that fills the 64 KiB pipe buffer blocks forever otherwise, and
-    /// `log --numstat` over a busy day comfortably exceeds that.
+    /// polled and its dedicated process group is killed on expiry. The pipes are
+    /// drained on their own threads: a child that fills the 64 KiB pipe buffer
+    /// blocks forever otherwise, and `log --numstat` over a busy day comfortably
+    /// exceeds that.
     fn run(&self, dir: &Path, args: &[&str]) -> Result<GitOut> {
         self.run_full(dir, args, &[], None)
     }
@@ -1613,6 +1614,15 @@ impl Git {
         });
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+
+        // A timed-out git can have helpers or wrapper descendants holding these
+        // pipes open. Put the invocation in its own group before exec so expiry
+        // can close the whole process tree rather than strand the reader joins.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
 
         // Never inherit a caller's git environment. standup can be launched from
         // a hook or a herdr action, where GIT_DIR or GIT_INDEX_FILE would
@@ -1694,7 +1704,10 @@ impl Git {
                 Ok(None) => {
                     if Instant::now() >= deadline {
                         timed_out = true;
-                        let _ = child.kill();
+                        terminate_process_group(&mut child);
+                        // Reap the direct child before joining any pipe or stdin
+                        // threads. Killing only this child is insufficient:
+                        // descendants can retain its file descriptors forever.
                         break child.wait().map_err(|err| err.to_string())?;
                     }
                     std::thread::sleep(backoff);
@@ -1738,6 +1751,32 @@ impl Git {
             timed_out,
         })
     }
+}
+
+/// Terminates a timed-out invocation and every descendant still in its group.
+///
+/// `process_group(0)` makes the direct child's PID the group ID. Signalling the
+/// negative ID therefore reaches inherited helpers as well as git itself. The
+/// direct kill is deliberately retained as a fallback for a failed group signal
+/// (or an unrepresentable platform PID), so the child can always be reaped.
+#[cfg(unix)]
+fn terminate_process_group(child: &mut std::process::Child) {
+    let killed_group = libc::pid_t::try_from(child.id())
+        .ok()
+        .filter(|group| *group > 0)
+        .is_some_and(|group| {
+            // SAFETY: `group` is the positive PID of the child whose dedicated
+            // process group was established by `CommandExt::process_group`.
+            unsafe { libc::kill(-group, libc::SIGKILL) == 0 }
+        });
+    if !killed_group {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 // ---------------------------------------------------------------------------
@@ -2187,6 +2226,132 @@ mod tests {
             "unexpected git path {}",
             git.program().display()
         );
+    }
+
+    /// A direct-child kill is not enough when a helper inherits the output
+    /// pipes: the readers remain blocked after git is reaped. The wrapper's
+    /// sleeping child deliberately retains both pipes, and the channel keeps a
+    /// broken implementation from hanging the test process indefinitely.
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_kills_descendants_before_joining_pipe_readers() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::mpsc;
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "standup-git-timeout-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create timeout fixture");
+        struct RemoveDir(PathBuf);
+        impl Drop for RemoveDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove_root = RemoveDir(root.clone());
+
+        let wrapper = root.join("git");
+        std::fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+sleep 300 &
+descendant=$!
+printf '%s\n' "$descendant" > "$2/descendant.pid"
+wait "$descendant"
+"#,
+        )
+        .expect("write fake git");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("stat fake git")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&wrapper, permissions).expect("make fake git executable");
+
+        let invocation_timeout = Duration::from_secs(1);
+        let return_limit = Duration::from_secs(3);
+        let thread_root = root.clone();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut git = Git::new(invocation_timeout);
+            // Do not mutate `GIT`: unit tests run concurrently, and the runner
+            // already owns the resolved program path explicitly.
+            git.program = wrapper;
+            let started = Instant::now();
+            let mut problems = Vec::new();
+            let out = git.capture(&thread_root, &["status"], &mut problems);
+            let _ = finished_tx.send((out, problems, started.elapsed()));
+        });
+
+        let pid_path = root.join("descendant.pid");
+        let ready_deadline = Instant::now() + return_limit;
+        let descendant = loop {
+            match std::fs::read_to_string(&pid_path) {
+                Ok(raw) => match raw.trim().parse::<libc::pid_t>() {
+                    Ok(pid) => break pid,
+                    Err(_) if Instant::now() < ready_deadline => std::thread::yield_now(),
+                    Err(err) => panic!("fake git published an invalid descendant pid: {err}"),
+                },
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::NotFound
+                        && Instant::now() < ready_deadline =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(err) => panic!("fake git did not publish its descendant pid: {err}"),
+            }
+        };
+
+        let (out, problems, elapsed) = match finished_rx.recv_timeout(return_limit) {
+            Ok(result) => result,
+            Err(err) => {
+                // Before the fix, killing the orphan closes its inherited pipes
+                // and lets the detached worker unwind instead of leaking it.
+                // SAFETY: this PID was published by this test's own wrapper.
+                unsafe {
+                    libc::kill(descendant, libc::SIGKILL);
+                }
+                drop(worker);
+                panic!("timed-out git did not return within {return_limit:?}: {err}");
+            }
+        };
+        worker.join().expect("git runner thread");
+
+        assert!(out.is_none(), "a timed-out capture has no output");
+        assert_eq!(
+            problems,
+            vec![format!(
+                "git status timed out after {invocation_timeout:?} in {}",
+                root.display()
+            )]
+        );
+        assert!(
+            elapsed <= return_limit,
+            "timeout returned after {elapsed:?}, limit was {return_limit:?}"
+        );
+
+        let gone_deadline = Instant::now() + return_limit;
+        let descendant_exists = || {
+            // SAFETY: signal zero only queries the PID published by the wrapper.
+            let result = unsafe { libc::kill(descendant, 0) };
+            result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        };
+        while descendant_exists() && Instant::now() < gone_deadline {
+            std::thread::yield_now();
+        }
+        if descendant_exists() {
+            // Do not leave the regression fixture behind if this assertion is
+            // what exposes a future process-group regression.
+            // SAFETY: this PID was published by this test's own wrapper.
+            unsafe {
+                libc::kill(descendant, libc::SIGKILL);
+            }
+            panic!("git descendant {descendant} survived the timeout");
+        }
     }
 
     /// The three shapes `git --version` is known to print. The Apple and Windows
