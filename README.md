@@ -536,6 +536,9 @@ standup --offline --path ~/repos/app --path ~/repos/api
 --slack               The same digest as Slack mrkdwn
 --html                The same digest as an email-ready HTML document
 --json                The same digest as JSON
+--version             Print version and exit
+--help, -h            Show help and exit
+--format <NAME>       Select text, markdown, slack, html, or json
 
 --since <WHEN>        Anything git accepts (default: midnight, local)
 --until <WHEN>        End of the window (default: now)
@@ -548,6 +551,7 @@ standup --offline --path ~/repos/app --path ~/repos/api
 --offline             Report only --path directories; never touch the socket
 --by-agent            Group by agent rather than by repository (opt-in; see below)
 --busy                Hide repositories with nothing in the window
+--all                 Show quiet repositories (the default)
 --no-siblings         Only checkouts a workspace is sitting in
 --max-commits <N>     Commits listed per checkout before the rest are summarised
 

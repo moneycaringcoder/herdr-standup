@@ -16,7 +16,8 @@ Verbs:
   --html              The same digest as an email-ready HTML document
   --json              The same digest as JSON, for scripting
   --version           Print version and exit
-  --help              Show this help
+  --help, -h          Show this help
+  --format <NAME>     Select text, markdown, slack, html, or json
 
 Window:
   --since <WHEN>      Anything git accepts: yesterday, '2 days ago', '09:00',
@@ -72,121 +73,29 @@ fn main() {
     }
 }
 
-/// Options that take a value, and so must never be mistaken for the verb.
-const VALUED: [&str; 6] = [
-    "--since",
-    "--until",
-    "--path",
-    "--format",
-    "--max-commits",
-    "--diff",
-];
-
-/// Options that stand alone.
-const FLAGS: [&str; 10] = [
-    "--since-last",
-    "--weekly",
-    "--monthly",
-    "--by-agent",
-    "--fail-if-empty",
-    "--offline",
-    "--busy",
-    "--all",
-    "--no-siblings",
-    "--quiet",
-];
-
-/// Every verb, so an argument that is none of the above can be rejected.
-const VERBS: [&str; 8] = [
-    "--report",
-    "--markdown",
-    "--slack",
-    "--html",
-    "--json",
-    "--version",
-    "--help",
-    "-h",
-];
-
-/// Rejects anything that is not a verb, an option, or an option's value.
-///
-/// Silently ignoring an argument is the same class of bug as everything else
-/// this plugin guards against: `standup --markdown "--offline --path /x"` — one
-/// quoted argument, easily produced by a shell that does not word-split —
-/// otherwise runs happily against the live session and prints a digest that
-/// answers a different question than the one asked, with nothing to notice.
-fn check_arguments(args: &[String]) -> Result<()> {
-    let mut skip_value = false;
-    let mut verb_seen = false;
-    for arg in args {
-        if skip_value {
-            skip_value = false;
-            continue;
-        }
-        let name = arg.split('=').next().unwrap_or(arg);
-        if VALUED.contains(&name) {
-            skip_value = !arg.contains('=');
-            continue;
-        }
-        if FLAGS.contains(&name) {
-            continue;
-        }
-        if VERBS.contains(&arg.as_str()) {
-            if verb_seen {
-                return Err(format!("`{arg}` is a second verb; pass only one\n\n{USAGE}").into());
-            }
-            verb_seen = true;
-            continue;
-        }
-        return Err(format!("unknown argument `{arg}`\n\n{USAGE}").into());
-    }
-    Ok(())
-}
-
-/// The verb is the first argument that is neither an option's name nor its
-/// value, so `standup --since yesterday --markdown` works as readily as
-/// `standup --markdown --since yesterday`. Ordering that matters is a papercut
-/// nobody should have to learn.
-fn verb_of(args: &[String]) -> &str {
-    let mut skip_value = false;
-    for arg in args {
-        if skip_value {
-            skip_value = false;
-            continue;
-        }
-        let name = arg.split('=').next().unwrap_or(arg);
-        if VALUED.contains(&name) {
-            // `--since=today` carries its value; bare `--since today` does not.
-            skip_value = !arg.contains('=');
-            continue;
-        }
-        if FLAGS.contains(&name) {
-            continue;
-        }
-        return arg;
-    }
-    "--report"
+fn parse_arguments(args: &[String]) -> Result<config::Arguments<'_>> {
+    config::Arguments::parse(args).map_err(|err| format!("{err}\n\n{USAGE}").into())
 }
 
 fn run(args: &[String]) -> Result<i32> {
-    let verb = verb_of(args);
-    // `--help` has to work even when the rest of the line is wrong; that is
-    // usually why somebody is asking for it.
-    if verb != "--help" && verb != "-h" {
-        check_arguments(args)?;
-    }
+    let parsed = parse_arguments(args)?;
+    let verb = parsed.verb();
     match verb {
-        "--report" | "--markdown" | "--slack" | "--html" | "--json" => {
-            let mut config = config::load_with_args(args)?;
+        config::Verb::Report
+        | config::Verb::Markdown
+        | config::Verb::Slack
+        | config::Verb::Html
+        | config::Verb::Json => {
+            let mut config = config::load_with_parsed_args(&parsed)?;
             // The verb picks the format unless `--format` said otherwise; both
             // spellings exist because the manifest wants one action per format
             // and a shell user wants one flag.
-            if config::value_arg(args, "--format")?.is_none() {
+            if parsed.value("--format").is_none() {
                 config.format = match verb {
-                    "--markdown" => config::Format::Markdown,
-                    "--slack" => config::Format::Slack,
-                    "--html" => config::Format::Html,
-                    "--json" => config::Format::Json,
+                    config::Verb::Markdown => config::Format::Markdown,
+                    config::Verb::Slack => config::Format::Slack,
+                    config::Verb::Html => config::Format::Html,
+                    config::Verb::Json => config::Format::Json,
                     _ => config.format,
                 };
             }
@@ -200,8 +109,8 @@ fn run(args: &[String]) -> Result<i32> {
             // A comparison is a different report, not a longer digest, so it
             // gets its own renderer and never advances the marker: what changed
             // between two digests is not "a digest a human read".
-            if let Some(earlier) = config::value_arg(args, "--diff")? {
-                let before = compare::read_digest(std::path::Path::new(&earlier))?;
+            if let Some(earlier) = parsed.value("--diff") {
+                let before = compare::read_digest(std::path::Path::new(earlier))?;
                 let comparison = compare::compare(&before, &digest);
                 print!("{}", render::render_comparison(&comparison, &config)?);
                 // What this run would post is the comparison, so that is what
@@ -219,15 +128,14 @@ fn run(args: &[String]) -> Result<i32> {
             }
             Ok(empty_status(&config, digest.is_quiet()))
         }
-        "--version" => {
+        config::Verb::Version => {
             println!("standup {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
-        "--help" | "-h" => {
+        config::Verb::Help => {
             print!("{USAGE}");
             Ok(0)
         }
-        other => Err(format!("unknown verb `{other}`\n\n{USAGE}").into()),
     }
 }
 
@@ -246,77 +154,160 @@ fn empty_status(config: &config::Config, quiet: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::verb_of;
+    use standup::config::{Arguments, Verb};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn the_verb_is_found_whatever_the_order() {
-        assert_eq!(verb_of(&args(&["--json"])), "--json");
-        assert_eq!(
-            verb_of(&args(&["--since", "today", "--markdown"])),
-            "--markdown"
-        );
-        assert_eq!(
-            verb_of(&args(&["--markdown", "--since", "today"])),
-            "--markdown"
-        );
-        assert_eq!(verb_of(&args(&["--since=today", "--json"])), "--json");
-    }
-
-    #[test]
-    fn bare_flags_are_not_verbs() {
-        assert_eq!(verb_of(&args(&["--since-last"])), "--report");
-        assert_eq!(verb_of(&args(&["--busy", "--markdown"])), "--markdown");
-        assert_eq!(verb_of(&args(&["--offline", "--path", "/tmp"])), "--report");
-    }
-
-    #[test]
-    fn no_arguments_means_a_human_report() {
-        assert_eq!(verb_of(&args(&[])), "--report");
-    }
-
-    #[test]
-    fn an_option_value_is_never_mistaken_for_a_verb() {
-        // A window spec that looks like a verb must still be treated as a value.
-        assert_eq!(verb_of(&args(&["--since", "--json"])), "--report");
-    }
-
-    /// Found the hard way: a shell that does not word-split an unquoted
-    /// variable hands the whole option string over as one argument. Ignoring it
-    /// ran the digest against the live session instead of the paths asked for,
-    /// and printed a perfectly plausible answer to a different question.
-    #[test]
-    fn an_argument_that_is_not_understood_is_refused() {
-        let err = super::check_arguments(&args(&["--markdown", "--offline --path /x"]))
-            .expect_err("a run-together option string must not be accepted");
-        assert!(err.to_string().contains("unknown argument"), "{err}");
-
-        assert!(super::check_arguments(&args(&["--typo"])).is_err());
-        assert!(super::check_arguments(&args(&["extra"])).is_err());
-        // A second verb is a mistake worth naming rather than silently ranking.
-        assert!(super::check_arguments(&args(&["--json", "--markdown"])).is_err());
-    }
-
-    #[test]
-    fn every_documented_spelling_is_accepted() {
-        super::check_arguments(&args(&[
-            "--markdown",
-            "--offline",
-            "--path",
-            "/x",
-            "--path=/y",
+    fn every_valued_option_accepts_both_spellings_and_last_value_wins() {
+        for name in [
             "--since",
-            "yesterday",
-            "--until=now",
-            "--busy",
-            "--no-siblings",
+            "--until",
+            "--path",
+            "--format",
             "--max-commits",
-            "5",
-        ]))
-        .expect("the documented spellings must all be accepted");
-        super::check_arguments(&args(&[])).expect("no arguments is the default report");
+            "--diff",
+        ] {
+            let separate = vec![name.to_string(), "separate".to_string()];
+            let parsed = Arguments::parse(&separate).expect(name);
+            assert_eq!(parsed.value(name), Some("separate"), "{name}");
+
+            let inline = vec![format!("{name}=inline")];
+            let parsed = Arguments::parse(&inline).expect(name);
+            assert_eq!(parsed.value(name), Some("inline"), "{name}");
+
+            let repeated = vec![
+                name.to_string(),
+                "first".to_string(),
+                format!("{name}=last"),
+            ];
+            let parsed = Arguments::parse(&repeated).expect(name);
+            assert_eq!(parsed.value(name), Some("last"), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_standalone_option_rejects_a_value() {
+        for name in [
+            "--since-last",
+            "--weekly",
+            "--monthly",
+            "--by-agent",
+            "--fail-if-empty",
+            "--offline",
+            "--busy",
+            "--all",
+            "--no-siblings",
+        ] {
+            let valid = args(&[name]);
+            Arguments::parse(&valid).expect(name);
+
+            let invalid = vec![format!("{name}=false")];
+            let err = Arguments::parse(&invalid).expect_err(name);
+            assert!(
+                err.to_string().contains(name) && err.to_string().contains("does not take a value"),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_bare_valued_option_refuses_a_recognized_token_as_its_value() {
+        for name in [
+            "--since",
+            "--until",
+            "--path",
+            "--format",
+            "--max-commits",
+            "--diff",
+        ] {
+            for recognized in ["--busy", "--json"] {
+                let raw = args(&[name, recognized]);
+                let err = Arguments::parse(&raw).expect_err(name);
+                assert!(
+                    err.to_string().contains(name) && err.to_string().contains("requires a value"),
+                    "{name} before {recognized}: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_reported_silent_acceptance_cases_are_named_errors() {
+        for (raw, expected) in [
+            (&["--quiet"][..], "unknown argument `--quiet`"),
+            (
+                &["--offline=false"][..],
+                "`--offline` does not take a value",
+            ),
+            (
+                &["--offline", "--path", "--busy", "--json"][..],
+                "`--path` requires a value",
+            ),
+        ] {
+            let raw = args(raw);
+            let err = Arguments::parse(&raw).expect_err(expected);
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn options_can_surround_the_verb_and_repeated_paths_survive() {
+        let raw = args(&[
+            "--since",
+            "first",
+            "--path",
+            "/a",
+            "--json",
+            "--path=/b",
+            "--since=last",
+        ]);
+        let parsed = Arguments::parse(&raw).expect("valid ordering");
+        assert_eq!(parsed.verb(), Verb::Json);
+        assert_eq!(parsed.value("--since"), Some("last"));
+
+        let config = standup::config::load_with_parsed_args(&parsed).expect("config");
+        assert_eq!(
+            config.extra_paths,
+            vec![
+                std::path::PathBuf::from("/a"),
+                std::path::PathBuf::from("/b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inline_value_may_begin_with_dashes() {
+        let raw = args(&["--path=--busy"]);
+        let parsed = Arguments::parse(&raw).expect("inline path");
+        assert_eq!(parsed.value("--path"), Some("--busy"));
+    }
+
+    #[test]
+    fn defaults_unknown_arguments_and_second_verbs_remain_strict() {
+        let none = args(&[]);
+        assert_eq!(Arguments::parse(&none).unwrap().verb(), Verb::Report);
+
+        for raw in [
+            &["--markdown", "--offline --path /x"][..],
+            &["--typo"][..],
+            &["extra"][..],
+        ] {
+            let raw = args(raw);
+            let err = Arguments::parse(&raw).expect_err("unknown argument");
+            assert!(err.to_string().contains("unknown argument"), "{err}");
+        }
+
+        let two_verbs = args(&["--json", "--markdown"]);
+        let err = Arguments::parse(&two_verbs).expect_err("second verb");
+        assert!(err.to_string().contains("second verb"), "{err}");
+    }
+
+    #[test]
+    fn help_bypasses_invalid_trailing_input() {
+        let raw = args(&["--help", "--offline=false", "--typo", "--json"]);
+        assert_eq!(Arguments::parse(&raw).expect("help").verb(), Verb::Help);
     }
 }
