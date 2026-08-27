@@ -2,6 +2,10 @@
 //!
 //! Verb dispatch only; every verb is implemented in the library crate.
 
+use std::ffi::OsString;
+use std::io::Write;
+use std::process::Command;
+
 use standup::{clock, compare, config, render, standup as digest, window, Result};
 
 const USAGE: &str = "\
@@ -62,8 +66,16 @@ standup never writes to a repository and makes no network calls.
 const EXIT_EMPTY: i32 = 2;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match run(&args) {
+    let result = match open_plugin_action_pane() {
+        Ok(true) => Ok(0),
+        Ok(false) => {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            run(&args)
+        }
+        Err(err) => Err(err),
+    };
+
+    match result {
         Err(err) => {
             eprintln!("standup: {err}");
             std::process::exit(1);
@@ -71,6 +83,63 @@ fn main() {
         Ok(code) if code != 0 => std::process::exit(code),
         Ok(_) => {}
     }
+}
+
+/// Turns a Herdr action invocation into the visible, same-id plugin pane.
+///
+/// Action commands run in the background, so their stdout is only a command
+/// log. Pane entrypoints do not carry `HERDR_PLUGIN_ACTION_ID` and continue
+/// through the ordinary report path below.
+fn open_plugin_action_pane() -> Result<bool> {
+    let Some(action_id) = non_empty_env("HERDR_PLUGIN_ACTION_ID") else {
+        return Ok(false);
+    };
+    let herdr_bin = required_action_env("HERDR_BIN_PATH")?;
+    let plugin_id = required_action_env("HERDR_PLUGIN_ID")?;
+
+    let status = Command::new(&herdr_bin)
+        .args(["plugin", "pane", "open", "--plugin"])
+        .arg(&plugin_id)
+        .args(["--entrypoint"])
+        .arg(&action_id)
+        .status()
+        .map_err(|err| format!("failed to spawn HERDR_BIN_PATH {herdr_bin:?}: {err}"))?;
+
+    if !status.success() {
+        return Err(format!(
+            "HERDR_BIN_PATH {herdr_bin:?} returned {status} while opening plugin pane {action_id:?}"
+        )
+        .into());
+    }
+
+    Ok(true)
+}
+
+fn non_empty_env(name: &str) -> Option<OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
+}
+
+fn required_action_env(name: &str) -> Result<OsString> {
+    non_empty_env(name)
+        .ok_or_else(|| format!("{name} is required when HERDR_PLUGIN_ACTION_ID is set").into())
+}
+
+/// Keeps a rendered plugin pane available for scrolling and copying.
+///
+/// Herdr closes an overlay when its command exits. Pane commands therefore
+/// wait for Herdr to close their stdin; ordinary shell runs and background
+/// action helpers carry no entrypoint id and still exit immediately.
+fn hold_plugin_pane() -> Result<()> {
+    if non_empty_env("HERDR_PLUGIN_ENTRYPOINT_ID").is_none() {
+        return Ok(());
+    }
+    std::io::stdout()
+        .flush()
+        .map_err(|err| format!("could not flush the plugin pane: {err}"))?;
+    let mut input = std::io::stdin().lock();
+    std::io::copy(&mut input, &mut std::io::sink())
+        .map_err(|err| format!("could not hold the plugin pane open: {err}"))?;
+    Ok(())
 }
 
 fn parse_arguments(args: &[String]) -> Result<config::Arguments<'_>> {
@@ -113,6 +182,7 @@ fn run(args: &[String]) -> Result<i32> {
                 let before = compare::read_digest(std::path::Path::new(earlier))?;
                 let comparison = compare::compare(&before, &digest);
                 print!("{}", render::render_comparison(&comparison, &config)?);
+                hold_plugin_pane()?;
                 // What this run would post is the comparison, so that is what
                 // "empty" has to describe here. A comparison where nothing moved
                 // is exactly the message not worth sending.
@@ -126,6 +196,7 @@ fn run(args: &[String]) -> Result<i32> {
                     eprintln!("standup: could not record this run for --since-last: {err}");
                 }
             }
+            hold_plugin_pane()?;
             Ok(empty_status(&config, digest.is_quiet()))
         }
         config::Verb::Version => {

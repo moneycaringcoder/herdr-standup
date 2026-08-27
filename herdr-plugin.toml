@@ -28,9 +28,9 @@ platforms = ["linux", "macos"]
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]
 
-# The pane is the surface people will actually live with: today's digest, in a
-# scrollable overlay, rendered once. It is a report and not a monitor, so it
-# does not refresh on a timer and does not hold the socket open.
+# Pane entrypoints are the visible surfaces: scrollable overlays rendered once.
+# They are reports and not monitors, so they do not refresh on a timer or hold
+# the socket open.
 [[panes]]
 id = "today"
 title = "Standup: today"
@@ -43,6 +43,38 @@ title = "Standup: since the last one"
 placement = "overlay"
 command = ["./target/release/standup", "--report", "--since-last"]
 
+[[panes]]
+id = "yesterday"
+title = "Standup: yesterday and today"
+placement = "overlay"
+command = ["./target/release/standup", "--report", "--since", "yesterday"]
+
+[[panes]]
+id = "markdown"
+title = "Standup: Markdown to paste"
+placement = "overlay"
+command = ["./target/release/standup", "--markdown"]
+
+[[panes]]
+id = "slack"
+title = "Standup: Slack message to paste"
+placement = "overlay"
+command = ["./target/release/standup", "--slack"]
+
+[[panes]]
+id = "html"
+title = "Standup: HTML to email"
+placement = "overlay"
+command = ["./target/release/standup", "--html"]
+
+[[panes]]
+id = "json"
+title = "Standup: JSON snapshot"
+placement = "overlay"
+command = ["./target/release/standup", "--json"]
+
+# Herdr starts actions in the background. The injected action id makes this
+# binary ask the running Herdr process to open the matching pane above.
 [[actions]]
 id = "today"
 title = "Standup: today"
