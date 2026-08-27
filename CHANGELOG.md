@@ -44,6 +44,10 @@ All notable changes to this project are recorded here. The format follows
     version owes, and both branches are live in CI.
 ### Fixed
 
+- Git timeouts now terminate the invocation's entire process group, so a
+  credential helper, wrapper, or other descendant retaining git's output pipes
+  cannot keep a report hung after the direct child is killed.
+
 - A **partial clone is no longer written to, or fetched from,** while reporting.
   In a `--filter=blob:none` or treeless clone the blobs a diff needs are not in
   the repository, and git's answer is to fetch them from the promisor remote and
