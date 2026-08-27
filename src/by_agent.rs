@@ -173,7 +173,7 @@ fn repos_for(digest: &Digest, label: &str, ignored: &Ignored) -> Vec<RepoDigest>
             checkouts,
             ..repo.clone()
         };
-        retotal(&mut filtered, ignored);
+        crate::standup::rollup(&mut filtered, ignored);
         out.push(filtered);
     }
     out
@@ -187,46 +187,6 @@ fn belongs(checkout: &crate::model::CheckoutDigest, label: &str) -> bool {
         .agents
         .iter()
         .any(|agent| agent.display().unwrap_or(UNATTRIBUTED) == label)
-}
-
-/// The same rule `standup::rollup` applies, over a subset of one repository's
-/// checkouts: distinct commits, the union of touched paths, and the excluded
-/// count recomputed over that union rather than summed.
-fn retotal(repo: &mut RepoDigest, ignored: &Ignored) {
-    let mut seen: Vec<&str> = Vec::new();
-    let mut files: Vec<&str> = Vec::new();
-    let mut days: Vec<&str> = Vec::new();
-    let mut churn = Churn::default();
-    for checkout in &repo.checkouts {
-        for commit in &checkout.report.commits {
-            if seen.contains(&commit.oid.as_str()) {
-                continue;
-            }
-            seen.push(&commit.oid);
-            churn.insertions += commit.insertions;
-            churn.deletions += commit.deletions;
-            let day = commit
-                .committed
-                .local
-                .split(' ')
-                .next()
-                .unwrap_or(&commit.committed.local);
-            if !days.contains(&day) {
-                days.push(day);
-            }
-            for file in &commit.files {
-                if !files.contains(&file.as_str()) {
-                    files.push(file);
-                }
-            }
-        }
-    }
-    churn.files = files.len();
-    churn.excluded = files.iter().filter(|file| ignored.matches(file)).count();
-    let (commits, active_days) = (seen.len(), days.len());
-    repo.commits = commits;
-    repo.active_days = active_days;
-    repo.churn = churn;
 }
 
 impl Grouping {

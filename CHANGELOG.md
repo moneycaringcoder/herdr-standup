@@ -42,6 +42,13 @@ All notable changes to this project are recorded here. The format follows
     what git *did*, so a git that changed its mind would have silently taken the
     other branch and left this one untested. It now pins which reading the
     version owes, and both branches are live in CI.
+
+### Changed
+
+- Repository and by-agent rollups now use one set-based union of commit ids,
+  local days, and touched paths, replacing quadratic membership scans in long
+  windows while keeping every rendered and JSON total unchanged.
+
 ### Fixed
 
 - Git timeouts now terminate the invocation's entire process group, so a
