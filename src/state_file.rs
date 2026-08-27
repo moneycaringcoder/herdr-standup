@@ -1,4 +1,9 @@
-//! Replacing a file in the plugin's own state directory, atomically.
+//! Coordinating and atomically replacing files in the plugin's state directory.
+//!
+//! Marker updates lock the directory itself before their read/compare/replace
+//! transaction. That provides one stable advisory lock object without creating
+//! a lock file whose deletion could split concurrent writers into separate lock
+//! domains. The descriptor owns the lock and releases it by RAII.
 //!
 //! Two callers, one rule, one explanation. The `--since-last` marker and the
 //! plumbing cache are both small JSON files that a later run *parses*, and a
@@ -15,11 +20,67 @@
 //! Nothing here ever touches a user's repository. These paths are the plugin's
 //! own state directory, which is the only place standup writes at all.
 
+use std::fs::File;
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Result;
+
+/// Runs `action` while holding an exclusive advisory lock on `dir`.
+///
+/// The directory itself is the lock object, so locking never creates a
+/// persistent artifact that another process could delete while it is in use.
+/// The descriptor releases the lock on every return path.
+pub fn with_directory_lock<T, F>(dir: &Path, action: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    std::fs::create_dir_all(dir).map_err(|err| {
+        format!(
+            "could not create the state directory {}: {err}",
+            dir.display()
+        )
+    })?;
+    let directory = File::open(dir).map_err(|err| {
+        format!(
+            "could not open the state directory {}: {err}",
+            dir.display()
+        )
+    })?;
+    lock_exclusive(&directory).map_err(|err| {
+        format!(
+            "could not lock the state directory {}: {err}",
+            dir.display()
+        )
+    })?;
+
+    action()
+}
+
+fn lock_exclusive(file: &File) -> std::io::Result<()> {
+    retry_interrupted(|| {
+        // SAFETY: `file` owns this descriptor for the duration of the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    })
+}
+
+fn retry_interrupted<F>(mut operation: F) -> std::io::Result<()>
+where
+    F: FnMut() -> std::io::Result<()>,
+{
+    loop {
+        match operation() {
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
 
 /// Writes `bytes` to `path`, replacing it atomically, creating the directory.
 ///
@@ -152,5 +213,22 @@ mod tests {
             b"new".as_slice()
         );
         std::fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn advisory_lock_retries_interrupted_acquisition() {
+        let mut attempts = 0;
+
+        retry_interrupted(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            } else {
+                Ok(())
+            }
+        })
+        .expect("lock eventually acquired");
+
+        assert_eq!(attempts, 3);
     }
 }
