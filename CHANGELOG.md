@@ -53,6 +53,10 @@ All notable changes to this project are recorded here. The format follows
   undocumented no-op `--quiet`; malformed invocations cannot silently produce a
   plausible report for a different request.
 
+- Herdr actions now open their matching visible overlay pane instead of sending
+  the report only to the capped background-command log. All seven report
+  formats remain one-shot and copyable from the pane.
+
 - A **partial clone is no longer written to, or fetched from,** while reporting.
   In a `--filter=blob:none` or treeless clone the blobs a diff needs are not in
   the repository, and git's answer is to fetch them from the promisor remote and

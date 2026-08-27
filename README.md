@@ -511,8 +511,10 @@ cargo build --release
 herdr plugin link .          # note: `link` does NOT run the build step
 ```
 
-The plugin adds actions and two overlay panes; nothing is written to your herdr `config.toml`, and
-there is no daemon to enable. It is a report, not a monitor.
+The plugin adds seven actions. Every action opens its matching scrollable
+overlay; each pane entrypoint renders once and stays open until you close it.
+Nothing is written to your herdr `config.toml`, and there is no daemon or
+refresh loop to enable. It is a report, not a monitor.
 
 | Action | What it does |
 |---|---|
@@ -520,6 +522,8 @@ there is no daemon to enable. It is a report, not a monitor.
 | Standup: since the last one | Everything since the last digest you read |
 | Standup: yesterday and today | A two-day window, for the morning after |
 | Standup: Markdown to paste | The same digest as Markdown |
+| Standup: Slack message to paste | The same digest as Slack mrkdwn |
+| Standup: HTML to email | The same digest as a self-contained HTML document |
 | Standup: JSON snapshot | Machine-readable; does not move the `--since-last` marker |
 
 It also works fine from a shell, with or without herdr running:
