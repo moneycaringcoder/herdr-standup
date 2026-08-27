@@ -16,6 +16,10 @@ The changelog section for that version has to exist, be dated, and actually
 say something. `--notes-out` writes it to a file, so the published release
 notes are the changelog rather than a second description of the same change
 that can disagree with it.
+
+When `--main-ref` is supplied, the tag and that ref are also resolved to
+commits and the tag commit must be reachable from the main commit. Omitting it
+keeps the pre-tag local rehearsal independent of Git history.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -151,9 +156,57 @@ def check(root: Path, tag: str) -> str:
     return changelog_notes(changelog, version)
 
 
+def _git_error(result: subprocess.CompletedProcess[str]) -> str:
+    detail = result.stderr.strip()
+    return f"exit {result.returncode}" + (f": {detail}" if detail else "")
+
+
+def _resolve_commit(root: Path, ref: str, *, name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
+            cwd=root,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError as error:
+        raise ReleaseError(f"Git {name} resolution failed: unable to run Git: {error}") from error
+    if result.returncode != 0:
+        raise ReleaseError(
+            f"Git {name} resolution failed for {ref!r} ({_git_error(result)})"
+        )
+    return result.stdout.strip()
+
+
+def check_main_ancestry(root: Path, tag: str, main_ref: str) -> None:
+    """Refuse unless the tag's commit is reachable from the named main ref."""
+    tag_commit = _resolve_commit(root, tag, name="tag")
+    main_commit = _resolve_commit(root, main_ref, name="main-ref")
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", tag_commit, main_commit],
+            cwd=root,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError as error:
+        raise ReleaseError(f"Git ancestry probe failed: unable to run Git: {error}") from error
+    if result.returncode == 0:
+        return
+    if result.returncode == 1:
+        raise ReleaseError(f"tag {tag!r} is outside main ref {main_ref!r}")
+    raise ReleaseError(f"Git ancestry probe failed ({_git_error(result)})")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Verify a release tag against every version surface")
     parser.add_argument("--tag", help="release tag to verify; defaults to GITHUB_REF_NAME")
+    parser.add_argument(
+        "--main-ref",
+        help="require the tag commit to be an ancestor of this Git ref",
+    )
     parser.add_argument(
         "--notes-out", type=Path, help="write the changelog section for this version here"
     )
@@ -167,6 +220,8 @@ def main() -> None:
             ref_name=os.environ.get("GITHUB_REF_NAME"),
         )
         notes = check(ROOT, tag)
+        if args.main_ref is not None:
+            check_main_ancestry(ROOT, tag, args.main_ref)
         if args.notes_out is not None:
             args.notes_out.write_text(notes, encoding="utf-8")
     except ReleaseError as error:
