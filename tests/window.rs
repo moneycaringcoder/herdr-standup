@@ -13,14 +13,14 @@ mod fixtures;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use standup::clock;
 use standup::config::{self, Config};
 use standup::git::Git;
 use standup::model::{Note, Period, Severity, WindowSource};
-use standup::window;
+use standup::{state_file, window};
 
 /// `HERDR_PLUGIN_STATE_DIR` is process-global, so these tests run one at a
 /// time even though cargo runs them on separate threads.
@@ -175,6 +175,103 @@ fn record_run_round_trips_through_previous_run() {
     // The rendering is re-derived on read, so the file survives a zone change.
     assert_eq!(read_back.local, at.local);
     assert_eq!(read_back.zone, at.zone);
+}
+
+#[test]
+fn record_run_keeps_an_equal_marker_byte_for_byte() {
+    let state = StateDir::new();
+    let raw = "{\n  \"epoch\": 1700000000,\n  \"local\": \"keep this exact marker\"\n}\n";
+    write_marker(&state, raw);
+
+    window::record_run(&clock::stamp(1_700_000_000)).expect("record equal epoch");
+
+    assert_eq!(
+        std::fs::read_to_string(state.marker()).expect("read marker"),
+        raw
+    );
+    assert_eq!(state.entries(), vec!["last-run.json".to_string()]);
+}
+
+#[test]
+fn record_run_keeps_a_newer_marker_byte_for_byte() {
+    let state = StateDir::new();
+    let raw = "{\n  \"epoch\": 1700000100,\n  \"local\": \"keep the newer marker\"\n}\n";
+    write_marker(&state, raw);
+
+    window::record_run(&clock::stamp(1_700_000_000)).expect("record older epoch");
+
+    assert_eq!(
+        std::fs::read_to_string(state.marker()).expect("read marker"),
+        raw
+    );
+    assert_eq!(state.entries(), vec!["last-run.json".to_string()]);
+}
+
+#[test]
+fn record_run_replaces_an_unreadable_marker() {
+    let state = StateDir::new();
+    write_marker(&state, "{\"epoch\": ");
+
+    window::record_run(&clock::stamp(1_700_000_000)).expect("replace unreadable marker");
+
+    assert_eq!(
+        window::previous_run().map(|stamp| stamp.epoch),
+        Some(1_700_000_000)
+    );
+    assert_eq!(state.entries(), vec!["last-run.json".to_string()]);
+}
+
+#[test]
+fn a_blocked_older_writer_cannot_regress_a_newer_marker() {
+    let state = StateDir::new();
+    let older = clock::stamp(1_700_000_000);
+    let newer = clock::stamp(1_700_000_100);
+    let (older_started_tx, older_started_rx) = mpsc::channel();
+    let (older_done_tx, older_done_rx) = mpsc::channel();
+    let mut older_writer = None;
+
+    // This is the newer writer's lock. It is acquired before the older writer
+    // opens its own descriptor, so the channel schedule does not depend on
+    // sleeps or on which waiter the kernel happens to wake first.
+    state_file::with_directory_lock(&state.path, || {
+        older_writer = Some(std::thread::spawn(move || {
+            older_started_tx.send(()).expect("announce older writer");
+            let result = window::record_run(&older).map_err(|err| err.to_string());
+            older_done_tx.send(result).expect("return older result");
+        }));
+        older_started_rx.recv().expect("older writer started");
+
+        let mut body = serde_json::to_string_pretty(&newer).expect("encode newer marker");
+        body.push('\n');
+        state_file::replace(&state.marker(), "last-run", body.as_bytes())
+            .expect("newer writer commits while holding the lock");
+        assert_eq!(
+            older_done_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty),
+            "the separately opened older writer must still be blocked"
+        );
+        Ok(())
+    })
+    .expect("newer writer lock");
+
+    older_done_rx
+        .recv()
+        .expect("older writer returned")
+        .expect("older writer succeeds without replacing newer state");
+    older_writer
+        .expect("older writer handle")
+        .join()
+        .expect("join older writer");
+
+    assert_eq!(
+        window::previous_run().map(|stamp| stamp.epoch),
+        Some(newer.epoch)
+    );
+    assert_eq!(
+        state.entries(),
+        vec!["last-run.json".to_string()],
+        "neither the advisory lock nor the atomic replacement leaves an artifact"
+    );
 }
 
 #[test]
@@ -440,9 +537,16 @@ fn a_marker_that_is_a_directory_is_unreadable_rather_than_fatal() {
 
     assert_eq!(window.source, WindowSource::SinceLastFirstRun);
     assert_eq!(warnings(&notes).len(), 1, "{notes:?}");
-    // And recording is refused rather than silently losing the window.
-    window::record_run(&clock::stamp(clock::now()))
-        .expect_err("a directory cannot be replaced by a file");
+    // Recording is refused rather than silently losing the window, and both
+    // the temporary replacement and the advisory descriptor are cleaned up on
+    // that error path.
+    let at = clock::stamp(clock::now());
+    window::record_run(&at).expect_err("a directory cannot be replaced by a file");
+    assert_eq!(state.entries(), vec!["last-run.json".to_string()]);
+
+    std::fs::remove_dir(state.marker()).expect("remove marker directory");
+    window::record_run(&at).expect("the failed writer released the directory lock");
+    assert_eq!(state.entries(), vec!["last-run.json".to_string()]);
 }
 
 /// A genuine first run keeps the calm wording: no warning, one plain note.

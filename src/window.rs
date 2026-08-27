@@ -59,7 +59,8 @@ pub fn resolve(
         };
         (WindowSource::Rollup { period }, Some(start))
     } else if config.since_last {
-        match read_marker() {
+        let marker_path = config::last_run_file();
+        match read_marker(&marker_path) {
             MarkerState::At(previous) => {
                 // A marker ahead of the clock means the clock moved backwards or
                 // the state directory came out of a backup. Left alone it would
@@ -71,7 +72,7 @@ pub fn resolve(
                          Delete that file, or pass an explicit --since, and run again.",
                         previous.full(),
                         clock::stamp(now).full(),
-                        config::last_run_file().display(),
+                        marker_path.display(),
                     )
                     .into());
                 }
@@ -107,7 +108,7 @@ pub fn resolve(
                      digest covers the default window ({}) rather than everything since your \
                      last one — it may repeat work you have already seen, or miss work older \
                      than that. Delete that file to start the marker again.",
-                    config::last_run_file().display(),
+                    marker_path.display(),
                     config.since
                 )));
                 (WindowSource::SinceLastFirstRun, None)
@@ -242,13 +243,14 @@ struct Marker {
 /// and a `None`, never a hard failure: a mangled state file must not stop the
 /// digest from printing.
 pub fn previous_run() -> Option<Stamp> {
-    match read_marker() {
+    let path = config::last_run_file();
+    match read_marker(&path) {
         MarkerState::At(stamp) => Some(stamp),
         MarkerState::Missing => None,
         MarkerState::Unreadable(reason) => {
             eprintln!(
                 "standup: ignoring the unreadable last-run marker {}: {reason}",
-                config::last_run_file().display()
+                path.display()
             );
             None
         }
@@ -268,9 +270,8 @@ enum MarkerState {
     At(Stamp),
 }
 
-fn read_marker() -> MarkerState {
-    let path = config::last_run_file();
-    let raw = match std::fs::read_to_string(&path) {
+fn read_marker(path: &Path) -> MarkerState {
+    let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return MarkerState::Missing,
         Err(err) => return MarkerState::Unreadable(err.to_string()),
@@ -289,12 +290,30 @@ fn read_marker() -> MarkerState {
 /// otherwise ignored, because it must not fail the digest the user asked for.
 /// Written **after** a successful render, so a run that blew up does not
 /// advance the marker past work it never showed anybody.
+///
+/// Concurrent completions are serialized through the state directory. Once a
+/// run has recorded an epoch, an equal or older completion leaves its marker
+/// byte-for-byte unchanged.
 pub fn record_run(at: &Stamp) -> Result<()> {
-    let mut body = serde_json::to_string_pretty(at)
-        .map_err(|err| format!("could not encode the last-run marker: {err}"))?;
-    body.push('\n');
-    // Replaced atomically: an interrupted run must not leave half a marker
-    // behind, because the next `--since-last` would refuse to parse it and
-    // silently fall back to the default window. See `state_file`.
-    state_file::replace(&config::last_run_file(), "last-run", body.as_bytes())
+    let path = config::last_run_file();
+    record_run_at(&path, at)
+}
+
+fn record_run_at(path: &Path, at: &Stamp) -> Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    state_file::with_directory_lock(dir, || {
+        if matches!(read_marker(path), MarkerState::At(existing) if existing.epoch >= at.epoch) {
+            return Ok(());
+        }
+
+        let mut body = serde_json::to_string_pretty(at)
+            .map_err(|err| format!("could not encode the last-run marker: {err}"))?;
+        body.push('\n');
+        // Replaced atomically: an interrupted run must not leave half a marker
+        // behind, because the next `--since-last` would refuse to parse it and
+        // silently fall back to the default window. See `state_file`.
+        state_file::replace(path, "last-run", body.as_bytes())
+    })
 }

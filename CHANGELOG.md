@@ -72,6 +72,10 @@ All notable changes to this project are recorded here. The format follows
   rename, so a power loss cannot discard the durable name of a completed
   `--since-last` marker or plumbing-cache write.
 
+- Concurrent human-readable reports now serialize their `--since-last` marker
+  updates and keep the greatest completed epoch, so a slower older run cannot
+  move the next window backwards after a newer run finishes.
+
 - A **partial clone is no longer written to, or fetched from,** while reporting.
   In a `--filter=blob:none` or treeless clone the blobs a diff needs are not in
   the repository, and git's answer is to fetch them from the promisor remote and
