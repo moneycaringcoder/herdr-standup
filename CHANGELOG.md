@@ -48,6 +48,11 @@ All notable changes to this project are recorded here. The format follows
   credential helper, wrapper, or other descendant retaining git's output pipes
   cannot keep a report hung after the direct child is killed.
 
+- Command-line parsing now rejects valueless flags carrying `=...`, refuses to
+  consume another option as a missing value, and no longer accepts the
+  undocumented no-op `--quiet`; malformed invocations cannot silently produce a
+  plausible report for a different request.
+
 - A **partial clone is no longer written to, or fetched from,** while reporting.
   In a `--filter=blob:none` or treeless clone the blobs a diff needs are not in
   the repository, and git's answer is to fetch them from the promisor remote and

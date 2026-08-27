@@ -169,6 +169,169 @@ fn glob_segment(pattern: &str, text: &str) -> bool {
     }
 }
 
+/// Output action selected by the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verb {
+    Report,
+    Markdown,
+    Slack,
+    Html,
+    Json,
+    Version,
+    Help,
+}
+
+const VALUED_OPTIONS: [&str; 6] = [
+    "--since",
+    "--until",
+    "--path",
+    "--format",
+    "--max-commits",
+    "--diff",
+];
+
+const STANDALONE_OPTIONS: [&str; 9] = [
+    "--since-last",
+    "--weekly",
+    "--monthly",
+    "--by-agent",
+    "--fail-if-empty",
+    "--offline",
+    "--busy",
+    "--all",
+    "--no-siblings",
+];
+
+const VERBS: [(&str, Verb); 8] = [
+    ("--report", Verb::Report),
+    ("--markdown", Verb::Markdown),
+    ("--slack", Verb::Slack),
+    ("--html", Verb::Html),
+    ("--json", Verb::Json),
+    ("--version", Verb::Version),
+    ("--help", Verb::Help),
+    ("-h", Verb::Help),
+];
+
+enum Token<'a> {
+    Valued(&'static str, Option<&'a str>),
+    Standalone(&'static str),
+    StandaloneWithValue(&'static str),
+    Verb(Verb),
+    Unknown,
+}
+
+fn classify(raw: &str) -> Token<'_> {
+    if let Some((name, value)) = raw.split_once('=') {
+        if let Some(name) = VALUED_OPTIONS.iter().copied().find(|known| *known == name) {
+            return Token::Valued(name, Some(value));
+        }
+        if let Some(name) = STANDALONE_OPTIONS
+            .iter()
+            .copied()
+            .find(|known| *known == name)
+        {
+            return Token::StandaloneWithValue(name);
+        }
+        return Token::Unknown;
+    }
+    if let Some(name) = VALUED_OPTIONS.iter().copied().find(|known| *known == raw) {
+        return Token::Valued(name, None);
+    }
+    if let Some(name) = STANDALONE_OPTIONS
+        .iter()
+        .copied()
+        .find(|known| *known == raw)
+    {
+        return Token::Standalone(name);
+    }
+    if let Some((_, verb)) = VERBS.iter().find(|(known, _)| *known == raw) {
+        return Token::Verb(*verb);
+    }
+    Token::Unknown
+}
+
+/// One strict interpretation of the command line, shared by dispatch and config.
+///
+/// Values borrow the original argument vector. An inline value is deliberately
+/// opaque, so `--path=--busy` names a path; a bare option followed by a known
+/// option or verb is instead diagnosed as missing its value.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Arguments<'a> {
+    verb: Verb,
+    values: Vec<(&'static str, &'a str)>,
+    standalone: Vec<&'static str>,
+}
+
+impl<'a> Arguments<'a> {
+    pub fn parse(args: &'a [String]) -> Result<Self> {
+        let mut values = Vec::new();
+        let mut standalone = Vec::new();
+        let mut verb = None;
+        let mut index = 0;
+
+        while let Some(raw) = args.get(index) {
+            match classify(raw) {
+                Token::Valued(name, Some(value)) => values.push((name, value)),
+                Token::Valued(name, None) => {
+                    let value = args
+                        .get(index + 1)
+                        .ok_or_else(|| format!("`{name}` requires a value"))?;
+                    if !matches!(classify(value), Token::Unknown) {
+                        return Err(format!(
+                            "`{name}` requires a value; `{value}` is another argument"
+                        )
+                        .into());
+                    }
+                    values.push((name, value));
+                    index += 1;
+                }
+                Token::StandaloneWithValue(name) => {
+                    return Err(format!("`{name}` does not take a value").into());
+                }
+                Token::Standalone(name) => standalone.push(name),
+                Token::Verb(Verb::Help) if verb.is_none() => {
+                    return Ok(Self {
+                        verb: Verb::Help,
+                        values,
+                        standalone,
+                    });
+                }
+                Token::Verb(_) if verb.is_some() => {
+                    return Err(format!("`{raw}` is a second verb; pass only one").into());
+                }
+                Token::Verb(next) => verb = Some(next),
+                Token::Unknown => {
+                    return Err(format!("unknown argument `{raw}`").into());
+                }
+            }
+            index += 1;
+        }
+
+        Ok(Self {
+            verb: verb.unwrap_or(Verb::Report),
+            values,
+            standalone,
+        })
+    }
+
+    pub fn verb(&self) -> Verb {
+        self.verb
+    }
+
+    /// Last value wins, while repeated `--path` values remain available in order.
+    pub fn value(&self, name: &str) -> Option<&'a str> {
+        self.values
+            .iter()
+            .rev()
+            .find_map(|(candidate, value)| (*candidate == name).then_some(*value))
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.standalone.contains(&name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Window start, as a git approxidate string.
@@ -284,69 +447,74 @@ impl Default for Config {
 }
 
 pub fn load_with_args(args: &[String]) -> Result<Config> {
+    let parsed = Arguments::parse(args)?;
+    load_with_parsed_args(&parsed)
+}
+
+pub fn load_with_parsed_args(args: &Arguments<'_>) -> Result<Config> {
     let mut config = load_file();
 
-    if let Some(since) = value_arg(args, "--since")? {
-        config.since = since;
+    if let Some(since) = args.value("--since") {
+        config.since = since.to_string();
         config.since_is_explicit = true;
     }
-    if let Some(until) = value_arg(args, "--until")? {
-        config.until = Some(until);
+    if let Some(until) = args.value("--until") {
+        config.until = Some(until.to_string());
     }
-    if let Some(raw) = value_arg(args, "--format")? {
-        config.format = Format::parse(&raw)?;
+    if let Some(raw) = args.value("--format") {
+        config.format = Format::parse(raw)?;
     }
-    if let Some(raw) = value_arg(args, "--max-commits")? {
+    if let Some(raw) = args.value("--max-commits") {
         config.max_commits = raw
             .trim()
             .parse::<usize>()
             .map_err(|err| format!("--max-commits {raw}: {err}"))?;
     }
-    for path in all_value_args(args, "--path")? {
-        config.extra_paths.push(PathBuf::from(path));
+    for (_, path) in args.values.iter().filter(|(name, _)| *name == "--path") {
+        config.extra_paths.push(PathBuf::from(*path));
     }
-    if args.iter().any(|a| a == "--since-last") {
+    if args.has("--since-last") {
         config.since_last = true;
     }
-    if args.iter().any(|a| a == "--all") {
+    if args.has("--all") {
         config.include_quiet = true;
     }
-    if args.iter().any(|a| a == "--busy") {
+    if args.has("--busy") {
         config.include_quiet = false;
     }
-    if args.iter().any(|a| a == "--offline") {
+    if args.has("--offline") {
         config.offline = true;
     }
-    if args.iter().any(|a| a == "--no-siblings") {
+    if args.has("--no-siblings") {
         config.include_siblings = false;
     }
-    if args.iter().any(|a| a == "--weekly") {
+    if args.has("--weekly") {
         config.rollup = Some(Period::Week);
     }
-    if args.iter().any(|a| a == "--monthly") {
+    if args.has("--monthly") {
         config.rollup = Some(Period::Month);
     }
-    if args.iter().any(|a| a == "--by-agent") {
+    if args.has("--by-agent") {
         config.by_agent = true;
     }
-    if args.iter().any(|a| a == "--fail-if-empty") {
+    if args.has("--fail-if-empty") {
         config.fail_if_empty = true;
     }
 
     // `--since` and `--since-last` answer the same question differently, and
     // silently preferring one would make the other look broken.
-    if config.since_last && value_arg(args, "--since")?.is_some() {
+    if config.since_last && args.value("--since").is_some() {
         return Err("--since and --since-last are mutually exclusive".into());
     }
     // A rollup sets its own window from the calendar, so a window the user also
     // asked for cannot be honoured. Refused by name rather than one quietly
     // winning, for the same reason as the pair above.
     if let Some(period) = config.rollup {
-        if args.iter().any(|a| a == "--weekly") && args.iter().any(|a| a == "--monthly") {
+        if args.has("--weekly") && args.has("--monthly") {
             return Err("--weekly and --monthly are mutually exclusive".into());
         }
         for conflicting in ["--since", "--until"] {
-            if value_arg(args, conflicting)?.is_some() {
+            if args.value(conflicting).is_some() {
                 return Err(format!(
                     "{} and {conflicting} are mutually exclusive: a rollup covers a calendar \
                      {}, which is the whole point of asking for one",
@@ -429,29 +597,6 @@ fn load_file() -> Config {
         config.ignore = ignore;
     }
     config
-}
-
-/// Value of `--name <VALUE>` or `--name=<VALUE>`, last occurrence winning.
-///
-/// A missing value the user typed is a hard error, unlike a malformed config
-/// file: they are looking right at it, and silently ignoring it would be worse.
-pub fn value_arg(args: &[String], name: &str) -> Result<Option<String>> {
-    Ok(all_value_args(args, name)?.pop())
-}
-
-/// Every occurrence of `--name <VALUE>`, in order.
-pub fn all_value_args(args: &[String], name: &str) -> Result<Vec<String>> {
-    let flag = format!("{name}=");
-    let mut found = Vec::new();
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        if let Some(value) = arg.strip_prefix(&flag) {
-            found.push(value.to_string());
-        } else if arg == name {
-            found.push(rest.next().ok_or(format!("{name} needs a value"))?.clone());
-        }
-    }
-    Ok(found)
 }
 
 pub fn plugin_id() -> String {
