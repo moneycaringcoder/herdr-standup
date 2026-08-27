@@ -7,10 +7,10 @@
 //! wholesale. So the bytes go to a temporary file beside the target, are put on
 //! disk, and are then renamed over it.
 //!
-//! The `sync_all` is not decoration. `rename` is atomic with respect to a crash
-//! only once the contents it names are durable; without it, a machine that loses
-//! power mid-run can leave the new name pointing at a partially written file,
-//! which is exactly the state this exists to make impossible.
+//! The two `sync_all` calls are not decoration. The temporary file is synced
+//! before the rename so the bytes are durable; the containing directory is
+//! synced afterwards so the new name is durable. Losing either half to a power
+//! failure can leave the state missing, reverted, or partially written.
 //!
 //! Nothing here ever touches a user's repository. These paths are the plugin's
 //! own state directory, which is the only place standup writes at all.
@@ -27,6 +27,18 @@ use crate::Result;
 /// files being replaced in one process cannot collide and a leftover temporary
 /// says what it was.
 pub fn replace(path: &Path, label: &str, bytes: &[u8]) -> Result<()> {
+    replace_with_directory_sync(path, label, bytes, sync_containing_directory)
+}
+
+fn replace_with_directory_sync<F>(
+    path: &Path,
+    label: &str,
+    bytes: &[u8],
+    sync_directory: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
     let dir = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
@@ -46,7 +58,19 @@ pub fn replace(path: &Path, label: &str, bytes: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&temp);
         return Err(format!("could not replace {}: {err}", path.display()).into());
     }
+    if let Err(err) = sync_directory(dir) {
+        return Err(format!(
+            "could not make replacement of {} durable by syncing containing directory {}: {err}",
+            path.display(),
+            dir.display()
+        )
+        .into());
+    }
     Ok(())
+}
+
+fn sync_containing_directory(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
 }
 
 fn temp_beside(dir: &Path, label: &str) -> PathBuf {
@@ -70,4 +94,63 @@ fn write_all(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn next_temp_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "standup-state-file-{tag}-{}-{}",
+            std::process::id(),
+            next_temp_id()
+        ));
+        std::fs::create_dir(&dir).expect("create test directory");
+        dir
+    }
+
+    #[test]
+    fn containing_directory_is_synced_after_rename() {
+        let dir = test_dir("sync-order");
+        let path = dir.join("state.json");
+        std::fs::write(&path, b"old").expect("write old state");
+        let mut synced = false;
+
+        replace_with_directory_sync(&path, "state", b"new", |synced_dir| {
+            assert_eq!(synced_dir, dir);
+            assert_eq!(
+                std::fs::read(&path).expect("read replacement"),
+                b"new".as_slice()
+            );
+            synced = true;
+            Ok(())
+        })
+        .expect("replace state");
+
+        assert!(synced);
+        std::fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn containing_directory_sync_failure_is_returned_after_rename() {
+        let dir = test_dir("sync-failure");
+        let path = dir.join("state.json");
+
+        let error = replace_with_directory_sync(&path, "state", b"new", |_| {
+            Err(std::io::Error::other("directory sync refused"))
+        })
+        .expect_err("directory sync should fail")
+        .to_string();
+
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains(&dir.display().to_string()));
+        assert!(error.contains("durable by syncing containing directory"));
+        assert!(error.contains("directory sync refused"));
+        assert_eq!(
+            std::fs::read(&path).expect("read replacement"),
+            b"new".as_slice()
+        );
+        std::fs::remove_dir_all(dir).expect("remove test directory");
+    }
 }
