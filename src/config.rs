@@ -177,6 +177,7 @@ pub enum Verb {
     Slack,
     Html,
     Json,
+    Tui,
     Version,
     Help,
 }
@@ -202,12 +203,13 @@ const STANDALONE_OPTIONS: [&str; 9] = [
     "--no-siblings",
 ];
 
-const VERBS: [(&str, Verb); 8] = [
+const VERBS: [(&str, Verb); 9] = [
     ("--report", Verb::Report),
     ("--markdown", Verb::Markdown),
     ("--slack", Verb::Slack),
     ("--html", Verb::Html),
     ("--json", Verb::Json),
+    ("--tui", Verb::Tui),
     ("--version", Verb::Version),
     ("--help", Verb::Help),
     ("-h", Verb::Help),

@@ -28,9 +28,14 @@ platforms = ["linux", "macos"]
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]
 
-# Pane entrypoints are the visible surfaces: scrollable overlays rendered once.
-# They are reports and not monitors, so they do not refresh on a timer or hold
-# the socket open.
+# Pane entrypoints are the visible surfaces. `digest` is interactive; the
+# existing format panes remain scrollable one-shot reports for the demo.
+[[panes]]
+id = "digest"
+title = "Standup: interactive digest"
+placement = "overlay"
+command = ["./target/release/standup", "--tui"]
+
 [[panes]]
 id = "today"
 title = "Standup: today"
@@ -73,8 +78,15 @@ title = "Standup: JSON snapshot"
 placement = "overlay"
 command = ["./target/release/standup", "--json"]
 
-# Herdr starts actions in the background. The injected action id makes this
-# binary ask the running Herdr process to open the matching pane above.
+# The interactive front door calls back into Herdr to open `digest`. Existing
+# actions keep routing through the binary's same-id one-shot pane helper.
+[[actions]]
+id = "open-digest"
+title = "Standup: open digest"
+description = "Open the interactive digest pane."
+contexts = ["global", "workspace"]
+command = ["sh", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin moneycaringcoder.standup --entrypoint digest"]
+
 [[actions]]
 id = "today"
 title = "Standup: today"

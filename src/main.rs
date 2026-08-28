@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::Command;
 
-use standup::{clock, compare, config, render, standup as digest, window, Result};
+use standup::{clock, compare, config, render, standup as digest, tui, window, Result};
 
 const USAGE: &str = "\
 standup — a daily digest of what your agents actually did
@@ -19,6 +19,7 @@ Verbs:
   --slack             The same digest as Slack mrkdwn, which is not Markdown
   --html              The same digest as an email-ready HTML document
   --json              The same digest as JSON, for scripting
+  --tui               Interactive digest pane
   --version           Print version and exit
   --help, -h          Show this help
   --format <NAME>     Select text, markdown, slack, html, or json
@@ -150,6 +151,12 @@ fn run(args: &[String]) -> Result<i32> {
     let parsed = parse_arguments(args)?;
     let verb = parsed.verb();
     match verb {
+        config::Verb::Tui => {
+            let mut config = config::load_with_parsed_args(&parsed)?;
+            config.record_run = false;
+            tui::run_digest(&config)?;
+            Ok(0)
+        }
         config::Verb::Report
         | config::Verb::Markdown
         | config::Verb::Slack
@@ -171,7 +178,7 @@ fn run(args: &[String]) -> Result<i32> {
             // A JSON run is a script reading, not a human. Advancing the
             // `--since-last` marker there would silently steal the window out
             // from under the next human digest.
-            config.record_run = config.format != config::Format::Json;
+            config.record_run = cli_records_run(config.format, parsed.value("--diff").is_some());
 
             let digest = digest::build(&config)?;
 
@@ -210,6 +217,12 @@ fn run(args: &[String]) -> Result<i32> {
     }
 }
 
+/// Printed human formats acknowledge a digest; JSON and comparisons are
+/// machine reads and leave the next human's window alone.
+fn cli_records_run(format: config::Format, comparison: bool) -> bool {
+    !comparison && format != config::Format::Json
+}
+
 /// The exit status for a run that has already printed its output.
 ///
 /// The digest is printed either way. `--fail-if-empty` is about what a caller
@@ -225,7 +238,7 @@ fn empty_status(config: &config::Config, quiet: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use standup::config::{Arguments, Verb};
+    use standup::config::{Arguments, Format, Verb};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
@@ -380,5 +393,14 @@ mod tests {
     fn help_bypasses_invalid_trailing_input() {
         let raw = args(&["--help", "--offline=false", "--typo", "--json"]);
         assert_eq!(Arguments::parse(&raw).expect("help").verb(), Verb::Help);
+    }
+    #[test]
+    fn cli_marker_policy_keeps_human_formats_and_excludes_machine_reads() {
+        for format in [Format::Text, Format::Markdown, Format::Slack, Format::Html] {
+            assert!(super::cli_records_run(format, false), "{format:?}");
+        }
+        assert!(!super::cli_records_run(Format::Json, false));
+        assert!(!super::cli_records_run(Format::Text, true));
+        assert!(!super::cli_records_run(Format::Markdown, true));
     }
 }
