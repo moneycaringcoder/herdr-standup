@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::Command;
 
-use standup::{clock, compare, config, render, standup as digest, window, Result};
+use standup::{clock, compare, config, render, standup as digest, tui, window, Result};
 
 const USAGE: &str = "\
 standup — a daily digest of what your agents actually did
@@ -19,6 +19,7 @@ Verbs:
   --slack             The same digest as Slack mrkdwn, which is not Markdown
   --html              The same digest as an email-ready HTML document
   --json              The same digest as JSON, for scripting
+  --tui               Interactive digest pane
   --version           Print version and exit
   --help, -h          Show this help
   --format <NAME>     Select text, markdown, slack, html, or json
@@ -150,6 +151,12 @@ fn run(args: &[String]) -> Result<i32> {
     let parsed = parse_arguments(args)?;
     let verb = parsed.verb();
     match verb {
+        config::Verb::Tui => {
+            let mut config = config::load_with_parsed_args(&parsed)?;
+            config.record_run = false;
+            tui::run_digest(&config)?;
+            Ok(0)
+        }
         config::Verb::Report
         | config::Verb::Markdown
         | config::Verb::Slack

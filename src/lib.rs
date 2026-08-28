@@ -15,6 +15,7 @@ pub mod model;
 pub mod render;
 pub mod standup;
 pub mod state_file;
+pub mod tui;
 pub mod window;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
