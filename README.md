@@ -14,6 +14,10 @@ over a time window — commits, change volume, branch, and whether the work land
 
 </div>
 
+The plugin's human surface is an interactive digest pane. The same data remains
+available as one-shot text and export formats; an expanded workspace contains
+the report below:
+
 ```
 standup — since 2026-08-15 00:00 UTC +0000 (generated 23:15)
 
@@ -62,8 +66,8 @@ After a day of running several agents across several worktrees, working out what
 visiting each workspace and running `git log` by hand — and the branches you most need to check are
 the ones whose workspace you already closed.
 
-`standup` answers it in one command. It asks herdr where the agents are, asks git what happened
-there, and prints the result grouped by repository. It reports facts and stops: no pull-request
+`standup` answers it in one pane. It asks herdr where the agents are, asks git what happened
+there, and groups the result by repository. It reports facts and stops: no pull-request
 status, no CI, no generated prose. What the work *meant* is for whoever reads it.
 
 ## What it tells you, per checkout
@@ -80,6 +84,52 @@ status, no CI, no generated prose. What the work *meant* is for whoever reads it
 - which agent was in the workspace, when herdr reports one
 
 Every number is one git command away from being checked by hand, and none of them is a guess.
+
+## Interactive digest pane
+
+`Standup: open digest` is the plugin's front door. It opens one ratatui overlay
+that keeps the repository grouping of the report and makes each workspace a
+cursor row. The row carries its branch, commit/change volume, and landing
+status; `Enter` expands the commits in place. Ordinary text inherits the
+terminal theme. Only status tags carry colour: landed and merged are green,
+unlanded and dirty are yellow, and errors are red. The cursor reverses the whole
+row, so it remains visible on real dark terminal themes.
+
+```text
+↑ / k        previous workspace
+↓ / j        next workspace
+mouse wheel  previous / next workspace
+left click   move the cursor (never expand or switch)
+Enter        expand or collapse the workspace's commits
+Esc          collapse the selected workspace; quit if it is already collapsed
+q            quit
+t            today, from local midnight
+y            yesterday through now, matching the existing two-day action
+l            since the last digest you viewed
+R            refresh the active window
+```
+
+Window changes happen in place. `R` re-reads git and herdr for the window on
+screen and carries the cursor and expanded workspaces forward by checkout path.
+On a since-last window it keeps the start already on screen; it does not
+re-resolve the marker into a nearly empty window.
+
+The since-last marker advances when the focused pane successfully enters `l`,
+and only then. Looking at today or yesterday and refreshing any window do not
+acknowledge since-last work. The existing one-shot CLI verbs keep their
+established behaviour: successful text, Markdown, Slack, and HTML digests
+advance the marker, while JSON and `--diff` do not.
+
+A herdr keybinding can open the pane through the `open-digest` front-door
+action:
+
+```toml
+type = "plugin_action"
+command = "moneycaringcoder.standup.open-digest"
+```
+
+The Markdown, Slack, HTML, and JSON actions remain one-shot export surfaces:
+copyable output for another system, not alternate interactive panes.
 
 ## Markdown you can paste
 
@@ -200,11 +250,14 @@ is counted twice and nothing is missed:
 standup --since-last
 ```
 
-The marker is recorded by the human-readable and Markdown runs only. A `--json` run is a script
-reading, and moving the marker there would silently steal the window out from under your next digest.
-The first `--since-last`, with no marker on record, falls back to today's window **and says so** —
-"you asked for today" and "this is the first run, so I fell back to today" are different answers to
-"why is this empty".
+In the interactive pane, the marker is recorded only when you enter the
+since-last window with `l`; `t`, `y`, and `R` leave it alone. The one-shot CLI
+keeps its established rule: text, Markdown, Slack, and HTML runs record a
+successful digest, while JSON and comparisons do not. A machine read must not
+silently steal the window from the next human. The first since-last view, with
+no marker on record, falls back to today's window **and says so** — "you asked
+for today" and "this is the first run, so I fell back to today" are different
+answers to "why is this empty".
 
 Every window is resolved to an absolute instant before any `git log` runs, and the header states it
 in local time with the zone spelled out. That is not decoration:
@@ -511,13 +564,14 @@ cargo build --release
 herdr plugin link .          # note: `link` does NOT run the build step
 ```
 
-The plugin adds seven actions. Every action opens its matching scrollable
-overlay; each pane entrypoint renders once and stays open until you close it.
-Nothing is written to your herdr `config.toml`, and there is no daemon or
-refresh loop to enable. It is a report, not a monitor.
+The plugin adds eight actions. `Standup: open digest` opens the interactive
+ratatui pane; the existing seven actions remain one-shot, copyable report and
+export overlays. Nothing is written to your herdr `config.toml`, and there is
+no daemon or automatic refresh loop to enable.
 
 | Action | What it does |
 |---|---|
+| Standup: open digest | Interactive digest with in-place windows and expansion |
 | Standup: today | Everything since local midnight |
 | Standup: since the last one | Everything since the last digest you read |
 | Standup: yesterday and today | A two-day window, for the morning after |
@@ -540,6 +594,7 @@ standup --offline --path ~/repos/app --path ~/repos/api
 --slack               The same digest as Slack mrkdwn
 --html                The same digest as an email-ready HTML document
 --json                The same digest as JSON
+--tui                 Interactive digest pane
 --version             Print version and exit
 --help, -h            Show help and exit
 --format <NAME>       Select text, markdown, slack, html, or json

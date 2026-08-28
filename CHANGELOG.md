@@ -8,6 +8,27 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- The plugin's human surface is now one interactive ratatui digest pane.
+  Repository groups retain the report's ordering; workspace rows show branch,
+  change volume, and landing state, and expand their commits in place. `j`/`k`
+  and arrows move, `Enter` expands, `t`/`y`/`l` switch windows, `R` refreshes,
+  and mouse clicks focus without taking action. Ordinary text inherits the
+  terminal theme, the whole cursor row reverses, and only bold status tags are
+  coloured: landed green, unlanded or dirty yellow, and errors red.
+
+  The pure state machine, ratatui view, and crossterm runtime are separate.
+  Raw mode, mouse capture, the alternate screen, and cursor visibility restore
+  from `Drop`, panic, SIGINT, and SIGTERM. Rendering tests drive ratatui's
+  `TestBackend`, so the terminal cells — including narrow layouts, colour,
+  reversal, and mouse hit boxes — are the asserted surface.
+
+  `l` advances the since-last marker when that focused window is entered.
+  Today, yesterday, and refresh do not; refreshing since-last pins the start
+  already on screen rather than resolving the new marker into an empty window.
+  Existing one-shot text, Markdown, Slack, and HTML behaviour is unchanged,
+  and JSON and comparisons still never move the marker. The new `open-digest`
+  action is the keybindable front door; all seven existing actions remain.
+
 - CI covers a git **older** than the two versions the collector's behaviour
   turns on. The matrix spans six rows, and the first run of the previous five
   measured all of them as git 2.55.0 — the images have converged on the newest
