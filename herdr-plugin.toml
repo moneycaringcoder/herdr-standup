@@ -11,7 +11,7 @@
 
 id = "moneycaringcoder.standup"
 name = "Standup"
-version = "0.1.1"
+version = "0.2.0"
 # The supported floor stays at 0.8.0, whose protocol-19 snapshot is captured in
 # the compatibility fixture. The consumed `session_snapshot` shape was last
 # revalidated live on stable 0.8.2, whose snapshot JSON reports protocol 20.
