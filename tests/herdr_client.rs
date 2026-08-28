@@ -445,9 +445,9 @@ fn a_response_with_no_end_of_line_is_given_up_on_rather_than_read_forever() {
 }
 
 #[test]
-fn a_single_line_over_the_ceiling_is_refused() {
+fn a_single_line_over_the_ceiling_is_refused_without_retrying() {
     let _guard = env_lock();
-    let server = TestServer::start(vec![Reply::Oversize, Reply::Oversize]);
+    let server = TestServer::start(vec![Reply::Oversize, captured_reply()]);
     let mut client = server.client();
 
     let err = client.workspaces().expect_err("over the ceiling");
@@ -455,8 +455,8 @@ fn a_single_line_over_the_ceiling_is_refused() {
     assert!(err.to_string().contains("past the"), "{err}");
     assert_eq!(
         server.requests().len(),
-        2,
-        "an oversized reply is a transport failure, so it is retried once"
+        1,
+        "a deterministic response-size violation must not be retried"
     );
 }
 

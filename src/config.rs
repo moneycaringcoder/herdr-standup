@@ -5,6 +5,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crook::env::PluginEnv;
+
 use crate::model::Period;
 use crate::Result;
 
@@ -602,7 +604,7 @@ fn load_file() -> Config {
 }
 
 pub fn plugin_id() -> String {
-    non_empty_env("HERDR_PLUGIN_ID").unwrap_or_else(|| PLUGIN_ID.to_string())
+    PluginEnv::resolve(PLUGIN_ID).plugin_id().to_owned()
 }
 
 /// Where the `--since-last` marker lives: `~/.local/state/herdr/plugins/<id>/`.
@@ -613,27 +615,12 @@ pub fn plugin_id() -> String {
 /// `--since-last` from a shell two different marker files, and the shell one
 /// would silently report the wrong window forever.
 pub fn state_dir() -> PathBuf {
-    non_empty_env("HERDR_PLUGIN_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            xdg_dir("XDG_STATE_HOME", ".local/state")
-                .join("herdr")
-                .join("plugins")
-                .join(plugin_id())
-        })
+    PluginEnv::resolve(PLUGIN_ID).state_dir().to_path_buf()
 }
 
 /// Where the config file lives. Same split-brain rule as [`state_dir`].
 pub fn config_dir() -> PathBuf {
-    non_empty_env("HERDR_PLUGIN_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            xdg_dir("XDG_CONFIG_HOME", ".config")
-                .join("herdr")
-                .join("plugins")
-                .join("config")
-                .join(plugin_id())
-        })
+    PluginEnv::resolve(PLUGIN_ID).config_dir().to_path_buf()
 }
 
 /// Marker holding the timestamp of the last run that a human read.
@@ -652,26 +639,6 @@ pub fn cache_file() -> PathBuf {
 /// bare, and never written to by anything but `git init`.
 pub fn date_ref_repo() -> PathBuf {
     state_dir().join("dateref.git")
-}
-
-/// An XDG base directory. An absolute variable wins; the spec says a relative
-/// one must be ignored. The temp fallback is for a process with no home at all,
-/// and is the wrong place for state — but it is better than the working
-/// directory, which for this plugin is somebody's repository.
-fn xdg_dir(variable: &str, relative: &str) -> PathBuf {
-    if let Some(base) = non_empty_env(variable)
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-    {
-        return base;
-    }
-    match non_empty_env("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-    {
-        Some(home) => home.join(relative),
-        None => std::env::temp_dir().join("herdr-no-home"),
-    }
 }
 
 /// herdr injects empty strings for absent context, so empty means unset.
