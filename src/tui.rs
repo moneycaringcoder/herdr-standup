@@ -9,4 +9,4 @@ pub mod state;
 pub mod view;
 
 pub use run::{map_key_event, run_digest};
-pub use state::{adopt, apply, DigestPane, Intent, Key, WindowKind};
+pub use state::{adopt, advances_marker, apply, DigestPane, Intent, Key, WindowKind};

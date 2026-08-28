@@ -14,7 +14,7 @@ use ratatui::Terminal;
 use crate::config::{Config, Format, DEFAULT_SINCE};
 use crate::Result;
 
-use super::state::{adopt, apply, fail, DigestPane, Intent, Key, WindowKind};
+use super::state::{adopt, advances_marker, apply, fail, DigestPane, Intent, Key, WindowKind};
 use super::view;
 
 type DigestTerminal = Terminal<CrosstermBackend<io::Stdout>>;
@@ -104,10 +104,13 @@ fn load_window(pane: DigestPane, base: &Config, window: WindowKind) -> DigestPan
         Ok(digest) => {
             let generated_at = digest.generated_at.clone();
             let pane = adopt(pane, digest, window);
-            if window == WindowKind::SinceLast {
+            if advances_marker(Intent::Load(window)) {
                 match crate::window::record_run(&generated_at) {
                     Ok(()) => pane,
-                    Err(err) => fail(pane, format!("could not advance the since-last marker: {err}")),
+                    Err(err) => fail(
+                        pane,
+                        format!("could not advance the since-last marker: {err}"),
+                    ),
                 }
             } else {
                 pane
@@ -131,10 +134,7 @@ fn refresh(pane: DigestPane, base: &Config) -> DigestPane {
             }
             adopt(pane, digest, active)
         }
-        Err(err) => fail(
-            pane,
-            format!("could not refresh {}: {err}", active.label()),
-        ),
+        Err(err) => fail(pane, format!("could not refresh {}: {err}", active.label())),
     }
 }
 

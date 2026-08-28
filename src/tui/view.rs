@@ -137,7 +137,10 @@ fn render_body(frame: &mut Frame<'_>, pane: &DigestPane, area: Rect) -> MouseMap
         return MouseMap::default();
     }
     if pane.row_count() == 0 {
-        frame.render_widget(Paragraph::new("no workspaces found.").style(normal()), inner);
+        frame.render_widget(
+            Paragraph::new("no workspaces found.").style(normal()),
+            inner,
+        );
         return MouseMap::default();
     }
 
@@ -145,7 +148,9 @@ fn render_body(frame: &mut Frame<'_>, pane: &DigestPane, area: Rect) -> MouseMap
     let capacity = inner.height as usize;
     let cursor_line = lines
         .iter()
-        .position(|line| matches!(line, BodyLine::Checkout { cursor, .. } if *cursor == pane.cursor))
+        .position(
+            |line| matches!(line, BodyLine::Checkout { cursor, .. } if *cursor == pane.cursor),
+        )
         .unwrap_or(0);
     let top = if lines.len() <= capacity {
         0
@@ -179,7 +184,9 @@ fn render_body(frame: &mut Frame<'_>, pane: &DigestPane, area: Rect) -> MouseMap
 fn render_repository(frame: &mut Frame<'_>, repo: &RepoDigest, area: Rect) {
     let stats = render::repo_stats(repo.commits, repo.churn);
     let width = area.width as usize;
-    let name_budget = width.saturating_sub(render::display_width(&stats) + 5).max(8);
+    let name_budget = width
+        .saturating_sub(render::display_width(&stats) + 5)
+        .max(8);
     let name = render::truncate_right(&repo.name, name_budget);
     let gap = width
         .saturating_sub(render::display_width(&name) + render::display_width(&stats) + 2)
@@ -210,11 +217,28 @@ fn render_checkout(
     let marker = if expanded { '▾' } else { '▸' };
     let workspace = workspace_label(checkout);
     let branch = render::head_label(&checkout.report.head);
-    let volume = render::repo_stats(checkout.report.commits.len(), checkout.report.churn);
-    let width = area.width as usize;
-    let workspace_width = (width / 4).clamp(10, 28);
-    let branch_width = (width / 5).clamp(9, 24);
-    let volume_width = (width / 4).clamp(12, 30);
+    let volume = if area.width < 90 {
+        format!(
+            "{}c {}f +{} −{}",
+            checkout.report.commits.len(),
+            checkout.report.churn.files,
+            checkout.report.churn.insertions,
+            checkout.report.churn.deletions
+        )
+    } else {
+        render::repo_stats(checkout.report.commits.len(), checkout.report.churn)
+    };
+    let tags = status_specs(checkout);
+    let tags_width = tags
+        .iter()
+        .map(|(label, _)| render::display_width(label) + 1)
+        .sum::<usize>();
+    let columns = (area.width as usize).saturating_sub(4 + tags_width + 3);
+    let workspace_width = (columns * 2 / 5).max(1);
+    let branch_width = (columns * 3 / 10).max(1);
+    let volume_width = columns
+        .saturating_sub(workspace_width + branch_width)
+        .max(1);
     let workspace = render::truncate_right(&workspace, workspace_width);
     let branch = render::truncate_right(&branch, branch_width);
     let volume = render::truncate_right(&volume, volume_width);
@@ -224,8 +248,11 @@ fn render_checkout(
         ),
         row_style,
     )];
-    spans.extend(status_tags(checkout, row_style));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    spans.extend(
+        tags.into_iter()
+            .map(|(label, color)| tag(label, color, row_style)),
+    );
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(normal()), area);
 }
 
 fn workspace_label(checkout: &CheckoutDigest) -> String {
@@ -256,24 +283,24 @@ fn tag(text: &'static str, color: Color, row_style: Style) -> Span<'static> {
     )
 }
 
-fn status_tags(checkout: &CheckoutDigest, row_style: Style) -> Vec<Span<'static>> {
+fn status_specs(checkout: &CheckoutDigest) -> Vec<(&'static str, Color)> {
     let report = &checkout.report;
     let mut tags = Vec::new();
     if !report.problems.is_empty() || matches!(report.head, Head::BranchDeleted { .. }) {
-        tags.push(tag("[ERROR]", Color::Red, row_style));
+        tags.push(("[ERROR]", Color::Red));
     }
     match report.landed {
-        Landed::IsDefault { .. } => tags.push(tag("[DEFAULT]", Color::Green, row_style)),
-        Landed::Merged { .. } => tags.push(tag("[MERGED]", Color::Green, row_style)),
-        Landed::Equivalent { .. } => tags.push(tag("[LANDED]", Color::Green, row_style)),
-        Landed::NotMerged { .. } => tags.push(tag("[UNLANDED]", Color::Yellow, row_style)),
-        Landed::Unknown { .. } => tags.push(tag("[UNKNOWN]", Color::Red, row_style)),
+        Landed::IsDefault { .. } => tags.push(("[DEFAULT]", Color::Green)),
+        Landed::Merged { .. } => tags.push(("[MERGED]", Color::Green)),
+        Landed::Equivalent { .. } => tags.push(("[LANDED]", Color::Green)),
+        Landed::NotMerged { .. } => tags.push(("[UNLANDED]", Color::Yellow)),
+        Landed::Unknown { .. } => tags.push(("[UNKNOWN]", Color::Red)),
     }
     if report.unpushed.at_risk() > 0 {
-        tags.push(tag("[UNPUSHED]", Color::Yellow, row_style));
+        tags.push(("[UNPUSHED]", Color::Yellow));
     }
     if !report.dirty.is_clean() {
-        tags.push(tag("[DIRTY]", Color::Yellow, row_style));
+        tags.push(("[DIRTY]", Color::Yellow));
     }
     tags
 }
@@ -286,7 +313,10 @@ fn render_commit(frame: &mut Frame<'_>, commit: &Commit, area: Rect) {
         commit.subject.trim(),
         budget.saturating_sub(render::display_width(&fixed)).max(8),
     );
-    let mut spans = vec![Span::styled(fixed, normal()), Span::styled(subject, normal())];
+    let mut spans = vec![
+        Span::styled(fixed, normal()),
+        Span::styled(subject, normal()),
+    ];
     if commit.is_merge {
         spans.push(Span::styled(" ", normal()));
         spans.push(tag("[MERGE]", Color::Green, normal()));
@@ -298,7 +328,10 @@ fn render_footer(frame: &mut Frame<'_>, pane: &DigestPane, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(normal())
-        .title(Span::styled(" details ", normal().add_modifier(Modifier::BOLD)));
+        .title(Span::styled(
+            " details ",
+            normal().add_modifier(Modifier::BOLD),
+        ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.is_empty() {
@@ -326,7 +359,11 @@ fn render_footer(frame: &mut Frame<'_>, pane: &DigestPane, area: Rect) {
 fn detail_lines(pane: &DigestPane) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(message) = &pane.message {
-        let color = if message.error { Color::Red } else { Color::Reset };
+        let color = if message.error {
+            Color::Red
+        } else {
+            Color::Reset
+        };
         let label = if message.error { "[ERROR]" } else { "[STATUS]" };
         lines.push(Line::from(vec![
             tag(label, color, normal()),
@@ -365,4 +402,3 @@ fn detail_lines(pane: &DigestPane) -> Vec<Line<'static>> {
     }
     lines
 }
-

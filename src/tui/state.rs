@@ -49,6 +49,12 @@ pub enum Intent {
     Quit,
 }
 
+/// Only a successful in-pane transition into since-last acknowledges that
+/// window. Refreshes and every other window are reads, not marker advances.
+pub fn advances_marker(intent: Intent) -> bool {
+    intent == Intent::Load(WindowKind::SinceLast)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub text: String,
@@ -139,11 +145,7 @@ pub fn apply(mut pane: DigestPane, key: Key) -> DigestPane {
             pane.intent = Intent::Load(WindowKind::SinceLast)
         }
         Key::Refresh => pane.intent = Intent::Refresh,
-        Key::Today
-        | Key::Yesterday
-        | Key::SinceLast
-        | Key::Focus(_)
-        | Key::Other => {}
+        Key::Today | Key::Yesterday | Key::SinceLast | Key::Focus(_) | Key::Other => {}
     }
     pane
 }

@@ -321,7 +321,7 @@ fn a_comparison_where_nothing_moved_is_empty() {
 // ---------------------------------------------------------------------------
 
 const MANIFEST: &str = include_str!("../herdr-plugin.toml");
-const ACTION_IDS: [&str; 7] = [
+const ONE_SHOT_ACTION_IDS: [&str; 7] = [
     "today",
     "since-last",
     "yesterday",
@@ -416,20 +416,40 @@ impl Drop for FakeHerdr {
 }
 
 #[test]
-fn every_declared_action_opens_its_same_id_one_shot_pane() {
+fn declared_actions_keep_one_shot_routes_and_add_the_digest_front_door() {
     let actions = manifest_entries("actions");
     let panes = manifest_entries("panes");
     assert_eq!(
         actions.iter().map(|entry| entry.0).collect::<Vec<_>>(),
-        ACTION_IDS
+        std::iter::once("open-digest")
+            .chain(ONE_SHOT_ACTION_IDS)
+            .collect::<Vec<_>>()
     );
+
+    let front_door = actions.first().expect("open-digest action");
+    assert_eq!(front_door.0, "open-digest");
     assert_eq!(
-        actions, panes,
-        "every action must have a same-id, same-title pane reusing its report command"
+        front_door.2,
+        r#"["sh", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin moneycaringcoder.standup --entrypoint digest"]"#
+    );
+    assert!(
+        panes.iter().any(|(id, _, command)| *id == "digest"
+            && *command == r#"["./target/release/standup", "--tui"]"#),
+        "the front door must have an interactive digest pane"
+    );
+
+    let one_shot_actions = actions.into_iter().skip(1).collect::<Vec<_>>();
+    let one_shot_panes = panes
+        .into_iter()
+        .filter(|entry| entry.0 != "digest")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        one_shot_actions, one_shot_panes,
+        "existing actions must retain same-id, same-title one-shot panes"
     );
 
     let fake = FakeHerdr::new(0);
-    for action_id in actions.iter().map(|entry| entry.0) {
+    for action_id in ONE_SHOT_ACTION_IDS {
         let output = fake.invoke(action_id);
         assert_eq!(
             output.status.code(),
