@@ -2,10 +2,10 @@
 //!
 //! Every other module reads this and none of them change it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crook::env::PluginEnv;
+use crook::env::{PluginContext, PluginEnv};
 
 use crate::model::Period;
 use crate::Result;
@@ -335,6 +335,54 @@ impl<'a> Arguments<'a> {
         self.standalone.contains(&name)
     }
 }
+/// The repository location attached to this invocation.
+///
+/// Installed plugin commands run with the plugin checkout as their process
+/// directory, so that directory is never an invocation fallback. Herdr's
+/// structured context is authoritative there; a direct shell invocation, which
+/// has no context, keeps using its process directory.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RepositoryScope {
+    workspace_id: Option<String>,
+    invocation_cwd: Option<PathBuf>,
+    plugin_root: Option<PathBuf>,
+}
+
+impl RepositoryScope {
+    fn resolve() -> Result<Self> {
+        let Some(context) = PluginContext::resolve()? else {
+            let cwd = std::env::current_dir()
+                .map_err(|err| format!("could not resolve the current directory: {err}"))?;
+            return Ok(Self {
+                workspace_id: None,
+                invocation_cwd: Some(cwd),
+                plugin_root: None,
+            });
+        };
+
+        let environment = PluginEnv::resolve(PLUGIN_ID);
+        Ok(Self {
+            workspace_id: context.workspace_id().map(str::to_owned),
+            invocation_cwd: context
+                .focused_pane_cwd()
+                .or_else(|| context.workspace_cwd())
+                .map(PathBuf::from),
+            plugin_root: environment.plugin_root().map(PathBuf::from),
+        })
+    }
+
+    pub fn workspace_id(&self) -> Option<&str> {
+        self.workspace_id.as_deref()
+    }
+
+    pub fn invocation_cwd(&self) -> Option<&Path> {
+        self.invocation_cwd.as_deref()
+    }
+
+    pub fn plugin_root(&self) -> Option<&Path> {
+        self.plugin_root.as_deref()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -393,6 +441,7 @@ pub struct Config {
     /// where an empty message posted to a channel is worse than no message.
     /// Changes the exit status only, never the output.
     pub fail_if_empty: bool,
+    pub repository_scope: RepositoryScope,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +495,7 @@ impl Default for Config {
             // Never the default. Repository grouping is the deliberate choice.
             by_agent: false,
             fail_if_empty: false,
+            repository_scope: RepositoryScope::default(),
         }
     }
 }
@@ -457,6 +507,7 @@ pub fn load_with_args(args: &[String]) -> Result<Config> {
 
 pub fn load_with_parsed_args(args: &Arguments<'_>) -> Result<Config> {
     let mut config = load_file();
+    config.repository_scope = RepositoryScope::resolve()?;
 
     if let Some(since) = args.value("--since") {
         config.since = since.to_string();
@@ -535,6 +586,12 @@ pub fn load_with_parsed_args(args: &Arguments<'_>) -> Result<Config> {
         }
     }
     Ok(config)
+}
+
+impl Config {
+    pub fn repository_scope(&self) -> &RepositoryScope {
+        &self.repository_scope
+    }
 }
 
 /// On-disk form. Every field optional, unknown keys ignored, so a newer file

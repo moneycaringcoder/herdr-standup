@@ -60,6 +60,11 @@ pub fn build(config: &Config) -> Result<Digest> {
             owners.push((path.clone(), workspace.clone()));
         }
     }
+    if !config.offline {
+        if let Some(cwd) = config.repository_scope().invocation_cwd() {
+            push_unique(&mut candidates, cwd.to_path_buf());
+        }
+    }
     for path in &config.extra_paths {
         push_unique(&mut candidates, path.clone());
     }
@@ -190,7 +195,8 @@ fn collect_workspaces(config: &Config, notes: &mut Vec<Note>) -> Result<Vec<Work
         }
         return Ok(Vec::new());
     }
-    match Herdr::connect().and_then(|mut herdr| herdr.workspaces()) {
+    match Herdr::connect().and_then(|mut herdr| herdr.workspaces_scoped(config.repository_scope()))
+    {
         Ok(workspaces) => Ok(workspaces),
         Err(err) if !config.extra_paths.is_empty() => {
             notes.push(Note::warning(format!(
