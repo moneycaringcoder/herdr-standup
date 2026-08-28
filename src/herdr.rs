@@ -1,21 +1,7 @@
-//! herdr socket client.
+//! Thin Herdr client wrapper and domain response reduction.
 //!
-//! Newline-delimited JSON over the socket at `HERDR_SOCKET_PATH`. The server
-//! answers exactly one request per connection and then closes, so every call
-//! must open a fresh connection. Transport failures are retried once to carry
-//! the client across `herdr update --handoff`; server rejections and invalid
-//! response contracts are not retried because doing so can duplicate effects.
-//!
-//! Request and response framing:
-//!
-//! ```text
-//! request : {"id":"<string>","method":"<name>","params":{...}}\n
-//! success : {"id":"<string>","result":{"type":"<snake_case>",...}}\n
-//! failure : {"id":"<string>","error":{"code":"...","message":"..."}}\n
-//! ```
-//! Every response `id` must be a string exactly matching the request id.
-//! Request `params` must be an object — `{}` for methods that take none, never
-//! `null`.
+//! Socket transport, NDJSON framing, response bounds, retries, envelope
+//! validation, and environment resolution are delegated to Crook.
 //!
 //! # What this plugin reads, and the trap in it
 //!
@@ -38,34 +24,15 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt;
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use crook::client::{Client, Error as ClientError, RetrySafety};
+use crook::env::PluginEnv;
+use serde_json::{json, Value};
 
 use crate::config;
 use crate::model::{AgentRef, WorkspaceRef};
 use crate::Result;
-
-/// Long enough that a busy server is not mistaken for a dead one, short enough
-/// that a digest can never park forever on a half-open socket.
-const IO_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Ceiling on one response line.
-///
-/// The framing is newline-delimited, so a peer that never sends a newline is a
-/// peer that never stops: reading such a line into a `String` grew the process
-/// to 5.3 GB in thirteen seconds and had it killed by the OOM killer. Verified
-/// against a socket that streams padding forever, and against a well-formed
-/// 5.8 MB reply.
-///
-/// The figure is deliberately generous. A live nineteen-pane session answers
-/// `session.snapshot` in about 54 KB — roughly 2.8 KB per pane — so this leaves
-/// room for a session an order of magnitude larger than any real one while
-/// still turning a runaway peer into a named error rather than a dead process.
-const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// A herdr error envelope, carried as a real error type so callers can tell a
 /// rejected request from a transport or response-contract failure.
@@ -116,198 +83,46 @@ impl fmt::Display for HerdrContractError {
 
 impl std::error::Error for HerdrContractError {}
 
-/// Split so that only transport failures are retried. A server rejection is a
-/// completed request, and a response-contract failure may also follow a
-/// completed request; retrying either could duplicate side effects.
-enum Failure {
-    Transport(String),
-    Rejected(HerdrError),
-    Contract(HerdrContractError),
-    Request(String),
-}
-
 #[derive(Debug)]
 pub struct Herdr {
-    socket_path: PathBuf,
-    next_id: u64,
+    client: Client,
 }
 
 impl Herdr {
     /// Dials the socket once so a missing server is reported here, with the
     /// path, rather than as a confusing failure inside the first call.
     pub fn connect() -> Result<Self> {
-        let socket_path = socket_path()?;
-        // The connection is dropped immediately: one request per connection
-        // means there is nothing worth holding open.
-        dial(&socket_path)?;
-        Ok(Self {
-            socket_path,
-            next_id: 0,
-        })
+        let environment = PluginEnv::resolve(config::PLUGIN_ID);
+        let client = Client::connect(environment.socket_path(), "standup")?;
+        Ok(Self { client })
     }
 
     /// One `session.snapshot`, reduced to the workspaces and the directories
     /// they occupy. Workspaces with no usable directory are dropped; everything
     /// else, including non-repositories, is returned and left for git to judge.
     pub fn workspaces(&mut self) -> Result<Vec<WorkspaceRef>> {
-        let result = self.call("session.snapshot", json!({}))?;
+        let result = self.request("session.snapshot", json!({}), RetrySafety::Idempotent)?;
         reduce_snapshot(&result)
     }
 
     pub fn notify(&mut self, title: &str, body: &str) -> Result<()> {
-        self.call("notification.show", json!({ "title": title, "body": body }))?;
+        self.request(
+            "notification.show",
+            json!({ "title": title, "body": body }),
+            RetrySafety::Never,
+        )?;
         Ok(())
     }
 
-    fn call(&mut self, method: &str, params: Value) -> Result<Value> {
-        self.next_id += 1;
-        let id = format!("standup:{}", self.next_id);
-        match self.call_once(&id, method, &params) {
+    fn request(&self, method: &str, params: Value, retry_safety: RetrySafety) -> Result<Value> {
+        match self.client.request(method, params, retry_safety) {
             Ok(result) => Ok(result),
-            Err(Failure::Rejected(err)) => Err(Box::new(err)),
-            Err(Failure::Contract(err)) => Err(Box::new(err)),
-            Err(Failure::Request(err)) => Err(err.into()),
-            // A dropped connection during server handoff is safe to retry:
-            // unlike a rejection or a parsed-but-invalid response, no response
-            // says that herdr completed the request.
-            Err(Failure::Transport(first)) => match self.call_once(&id, method, &params) {
-                Ok(result) => Ok(result),
-                Err(Failure::Rejected(err)) => Err(Box::new(err)),
-                Err(Failure::Contract(err)) => Err(Box::new(err)),
-                Err(Failure::Request(err)) => Err(err.into()),
-                Err(Failure::Transport(second)) => {
-                    Err(format!("{method} failed twice: {first}; on retry: {second}").into())
-                }
-            },
+            Err(ClientError::Protocol { code, message }) => {
+                Err(Box::new(HerdrError { code, message }))
+            }
+            Err(error) => Err(Box::new(error)),
         }
     }
-
-    fn call_once(
-        &self,
-        id: &str,
-        method: &str,
-        params: &Value,
-    ) -> std::result::Result<Value, Failure> {
-        let stream = dial(&self.socket_path).map_err(|e| Failure::Transport(e.to_string()))?;
-
-        // `params` is mandatory and must be an object — never null, `{}` when
-        // empty.
-        let params = if params.is_object() {
-            params.clone()
-        } else {
-            Value::Object(Map::new())
-        };
-        let mut line = serde_json::to_string(&json!({
-            "id": id,
-            "method": method,
-            "params": params,
-        }))
-        .map_err(|e| Failure::Request(format!("could not encode request: {e}")))?;
-        line.push('\n');
-
-        (&stream)
-            .write_all(line.as_bytes())
-            .and_then(|()| (&stream).flush())
-            .map_err(|e| Failure::Transport(format!("write to {method} failed: {e}")))?;
-
-        // Bounded, because the peer decides where the line ends and a broken one
-        // never says. One extra byte is allowed through so that a reply landing
-        // exactly on the ceiling can still be told apart from one that ran past
-        // it.
-        let mut response = String::new();
-        let read = BufReader::new((&stream).take(MAX_RESPONSE_BYTES + 1))
-            .read_line(&mut response)
-            .map_err(|e| {
-                Failure::Transport(match e.kind() {
-                    // The read timeout firing. The raw message for this is
-                    // "Resource temporarily unavailable", which tells a person
-                    // nothing at all about what went wrong.
-                    ErrorKind::WouldBlock | ErrorKind::TimedOut => format!(
-                        "herdr accepted the connection but did not answer {method} within {}s",
-                        IO_TIMEOUT.as_secs()
-                    ),
-                    _ => format!("read of {method} response failed: {e}"),
-                })
-            })?;
-        if read as u64 > MAX_RESPONSE_BYTES {
-            return Err(Failure::Transport(format!(
-                "the response to {method} went past the {MAX_RESPONSE_BYTES}-byte ceiling; \
-                 giving up rather than reading until this process is killed"
-            )));
-        }
-        if response.trim().is_empty() {
-            return Err(Failure::Transport(
-                "server closed the connection without answering".into(),
-            ));
-        }
-
-        let value: Value = serde_json::from_str(response.trim_end()).map_err(|e| {
-            Failure::Contract(HerdrContractError::new(
-                method,
-                format!("response was malformed JSON: {e}"),
-            ))
-        })?;
-
-        match value.get("id") {
-            Some(Value::String(response_id)) if response_id == id => {}
-            Some(Value::String(response_id)) => {
-                return Err(Failure::Contract(HerdrContractError::new(
-                    method,
-                    format!(
-                        "response `id` did not match request `id`: expected `{id}`, got `{response_id}`"
-                    ),
-                )));
-            }
-            Some(_) => {
-                return Err(Failure::Contract(HerdrContractError::new(
-                    method,
-                    "response `id` must be a string",
-                )));
-            }
-            None => {
-                return Err(Failure::Contract(HerdrContractError::new(
-                    method,
-                    "response is missing required string `id`",
-                )));
-            }
-        }
-
-        if let Some(err) = value.get("error") {
-            return Err(Failure::Rejected(HerdrError {
-                code: text(err, "code").unwrap_or("unknown_error").to_string(),
-                message: text(err, "message").unwrap_or("no message").to_string(),
-            }));
-        }
-        match value.get("result") {
-            Some(result) => Ok(result.clone()),
-            None => Err(Failure::Contract(HerdrContractError::new(
-                method,
-                "response carried neither `result` nor `error`",
-            ))),
-        }
-    }
-}
-
-fn dial(socket_path: &Path) -> Result<UnixStream> {
-    let stream = UnixStream::connect(socket_path)
-        .map_err(|e| format!("cannot reach herdr at {}: {e}", socket_path.display()))?;
-    // Without these a half-open socket parks the digest forever.
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    Ok(stream)
-}
-
-fn socket_path() -> Result<PathBuf> {
-    // herdr injects this into everything it spawns; the fallback exists only
-    // for hand invocation from a shell.
-    if let Some(path) = config::non_empty_env("HERDR_SOCKET_PATH") {
-        return Ok(PathBuf::from(path));
-    }
-    let config_home = config::non_empty_env("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| config::non_empty_env("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or("HERDR_SOCKET_PATH is unset and neither XDG_CONFIG_HOME nor HOME is set")?;
-    Ok(config_home.join("herdr").join("herdr.sock"))
 }
 
 // ---------------------------------------------------------------------------
