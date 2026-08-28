@@ -1,0 +1,61 @@
+{
+  "herdr_version": "0.8.2",
+  "plugin_root": "/home/dev/.local/share/herdr/plugins/moneycaringcoder.standup/0.2.0",
+  "plugin_context": {
+    "workspace_id": "w-user",
+    "workspace_cwd": "/home/dev/code/workspace-fallback",
+    "focused_pane_id": "w-user:p1",
+    "focused_pane_cwd": "/home/dev/code/invoking-repository",
+    "future_field": "ignored"
+  },
+  "result": {
+    "type": "session_snapshot",
+    "snapshot": {
+      "version": 31,
+      "protocol": 20,
+      "workspaces": [
+        {
+          "workspace_id": "w-user",
+          "number": 1,
+          "label": "invoking workspace"
+        },
+        {
+          "workspace_id": "w-global",
+          "number": 2,
+          "label": "another user workspace"
+        },
+        {
+          "workspace_id": "w-tracked",
+          "number": 3,
+          "label": "tracked user workspace",
+          "worktree": {
+            "checkout_path": "/home/dev/code/tracked-repository"
+          }
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "w-user:p-plugin",
+          "workspace_id": "w-user",
+          "cwd": "/home/dev/.local/share/herdr/plugins/moneycaringcoder.standup/0.2.0"
+        },
+        {
+          "pane_id": "w-user:p-plugin-child",
+          "workspace_id": "w-user",
+          "cwd": "/home/dev/.local/share/herdr/plugins/moneycaringcoder.standup/0.2.0/target/release"
+        },
+        {
+          "pane_id": "w-global:p1",
+          "workspace_id": "w-global",
+          "cwd": "/home/dev/code/global-repository"
+        },
+        {
+          "pane_id": "w-tracked:p-plugin",
+          "workspace_id": "w-tracked",
+          "cwd": "/home/dev/.local/share/herdr/plugins/moneycaringcoder.standup/0.2.0"
+        }
+      ],
+      "agents": []
+    }
+  }
+}

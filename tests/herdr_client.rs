@@ -18,6 +18,7 @@
 //!
 //! No running herdr is required, and nothing here touches the user's state.
 
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -26,7 +27,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use standup::herdr::{error_code, reduce_snapshot, Herdr};
+use standup::herdr::{error_code, reduce_snapshot, reduce_snapshot_scoped, Herdr};
 use standup::model::WorkspaceRef;
 
 /// An anonymised `herdr api snapshot` response, structurally identical to the
@@ -34,6 +35,7 @@ use standup::model::WorkspaceRef;
 /// re-serialised onto one line before it goes on the wire. Only the envelope id
 /// is replaced, because it is request-specific and must echo the client's id.
 const CAPTURE: &str = include_str!("snapshots/session_snapshot.json");
+const INSTALLED_0_8_2: &str = include_str!("snapshots/herdr_0_8_2_installed_plugin.json");
 
 /// The `foreground_cwd` of two panes in the capture, both of which had a real
 /// `cwd` in a repository at the time. Reading the wrong field puts this in the
@@ -48,6 +50,10 @@ const OVER_THE_CEILING: usize = 5 * 1024 * 1024;
 
 fn captured() -> Value {
     serde_json::from_str(CAPTURE).expect("the captured fixture is JSON")
+}
+
+fn installed_0_8_2() -> Value {
+    serde_json::from_str(INSTALLED_0_8_2).expect("the Herdr 0.8.2 fixture is JSON")
 }
 
 /// The whole response envelope, framed as one line the way herdr frames it.
@@ -86,6 +92,35 @@ fn env_lock() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct ScopedEnv {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnv {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        if let Some(value) = &self.previous {
+            std::env::set_var(self.key, value);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
 }
 
 /// What the server does with one connection.
@@ -557,6 +592,127 @@ fn stable_0_8_2_snapshot_metadata_is_shape_compatible() {
 
     assert!(workspaces.is_empty());
     assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn installed_0_8_2_context_excludes_the_plugin_checkout_but_keeps_user_repositories() {
+    let _guard = env_lock();
+    let fixture = installed_0_8_2();
+    let context = fixture["plugin_context"].to_string();
+    let plugin_root = fixture["plugin_root"].as_str().expect("plugin root");
+    let _context = ScopedEnv::set("HERDR_PLUGIN_CONTEXT_JSON", context);
+    let _root = ScopedEnv::set("HERDR_PLUGIN_ROOT", plugin_root);
+    let config = standup::config::load_with_args(&[]).expect("installed plugin config");
+
+    let workspaces =
+        reduce_snapshot_scoped(&fixture["result"], config.repository_scope()).expect("snapshot");
+
+    assert_eq!(
+        workspace(&workspaces, "w-user").paths,
+        vec![PathBuf::from("/home/dev/code/invoking-repository")],
+        "the focused pane cwd replaces the plugin pane cwd when worktree metadata is absent"
+    );
+    assert_eq!(
+        workspace(&workspaces, "w-global").paths,
+        vec![PathBuf::from("/home/dev/code/global-repository")],
+        "repository reporting remains global rather than narrowing to the invoking workspace"
+    );
+    assert_eq!(
+        workspace(&workspaces, "w-tracked").paths,
+        vec![PathBuf::from("/home/dev/code/tracked-repository")],
+        "tracked user worktrees remain authoritative"
+    );
+    assert!(
+        workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.paths)
+            .all(|path| !path.starts_with(plugin_root)),
+        "the installed Standup checkout must not become a report repository: {workspaces:#?}"
+    );
+
+    let mut workspace_only = fixture["plugin_context"].clone();
+    workspace_only
+        .as_object_mut()
+        .expect("plugin context object")
+        .remove("focused_pane_cwd");
+    std::env::set_var("HERDR_PLUGIN_CONTEXT_JSON", workspace_only.to_string());
+    let fallback_config = standup::config::load_with_args(&[]).expect("workspace context fallback");
+    let fallback = reduce_snapshot_scoped(&fixture["result"], fallback_config.repository_scope())
+        .expect("snapshot");
+    assert_eq!(
+        workspace(&fallback, "w-user").paths,
+        vec![PathBuf::from("/home/dev/code/workspace-fallback")],
+        "workspace_cwd is the fallback when focused_pane_cwd is absent"
+    );
+
+    let mut plugin_focused = fixture["plugin_context"].clone();
+    plugin_focused["focused_pane_cwd"] = json!(plugin_root);
+    std::env::set_var("HERDR_PLUGIN_CONTEXT_JSON", plugin_focused.to_string());
+    let plugin_focused_config =
+        standup::config::load_with_args(&[]).expect("plugin focused pane fallback");
+    let plugin_focused_workspaces =
+        reduce_snapshot_scoped(&fixture["result"], plugin_focused_config.repository_scope())
+            .expect("snapshot");
+    assert_eq!(
+        workspace(&plugin_focused_workspaces, "w-user").paths,
+        vec![PathBuf::from("/home/dev/code/workspace-fallback")],
+        "a focused plugin pane must fall back to the genuine workspace cwd"
+    );
+}
+
+#[test]
+fn direct_reduction_without_plugin_context_keeps_pane_cwd_behavior() {
+    let fixture = installed_0_8_2();
+
+    let workspaces = reduce_snapshot(&fixture["result"]).expect("snapshot");
+
+    assert!(
+        workspace(&workspaces, "w-user")
+            .paths
+            .iter()
+            .any(|path| path == Path::new(fixture["plugin_root"].as_str().unwrap())),
+        "an unscoped direct invocation must not apply installed-plugin filtering"
+    );
+}
+
+#[test]
+fn malformed_plugin_context_fails_before_repository_discovery() {
+    let _guard = env_lock();
+    let _context = ScopedEnv::set("HERDR_PLUGIN_CONTEXT_JSON", "{");
+
+    let error = standup::config::load_with_args(&[])
+        .expect_err("malformed non-empty plugin context must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("HERDR_PLUGIN_CONTEXT_JSON contains malformed JSON"),
+        "the environment variable and parse failure must be clear: {error}"
+    );
+}
+
+#[test]
+fn plugin_root_without_plugin_context_never_falls_back_to_process_cwd() {
+    let _guard = env_lock();
+    let _context = ScopedEnv::remove("HERDR_PLUGIN_CONTEXT_JSON");
+    let _root = ScopedEnv::set(
+        "HERDR_PLUGIN_ROOT",
+        "/home/dev/.local/share/herdr/plugins/moneycaringcoder.standup/0.2.0",
+    );
+
+    let error = standup::config::load_with_args(&[])
+        .expect_err("a partial installed-plugin environment must fail");
+
+    let message = error.to_string();
+    assert!(message.contains("HERDR_PLUGIN_ROOT is set"), "{message}");
+    assert!(
+        message.contains("HERDR_PLUGIN_CONTEXT_JSON is absent"),
+        "{message}"
+    );
+    assert!(
+        message.contains("refusing to use the installed plugin checkout"),
+        "{message}"
+    );
 }
 
 #[test]

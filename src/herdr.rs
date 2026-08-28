@@ -16,10 +16,12 @@
 //! herdr itself opened as a repository or a worktree. In a live ten-workspace
 //! capture, five workspaces sitting in ordinary git checkouts had no `worktree`
 //! key at all. Discovery must take the union of `worktree.checkout_path` and
-//! every distinct pane `cwd`, and let git decide which are checkouts. Use
-//! `cwd`, never `foreground_cwd` — the latter follows whatever the foreground
-//! process happens to be doing and was observed pointing into a node_modules
-//! directory.
+//! every distinct user pane `cwd`, and let git decide which are checkouts.
+//! Installed plugin panes are the exception: Herdr 0.8.2 runs them from the
+//! plugin root, which is an implementation directory rather than user work.
+//! The invocation context restores the focused user directory when that
+//! workspace has no tracked checkout. Use `cwd`, never `foreground_cwd` — the
+//! latter follows whatever the foreground process happens to be doing.
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -30,7 +32,7 @@ use crook::client::{Client, Error as ClientError, RetrySafety};
 use crook::env::PluginEnv;
 use serde_json::{json, Value};
 
-use crate::config;
+use crate::config::{self, RepositoryScope};
 use crate::model::{AgentRef, WorkspaceRef};
 use crate::Result;
 
@@ -105,6 +107,13 @@ impl Herdr {
         reduce_snapshot(&result)
     }
 
+    /// The same snapshot, with installed-plugin invocation directories applied
+    /// to repository discovery.
+    pub fn workspaces_scoped(&mut self, scope: &RepositoryScope) -> Result<Vec<WorkspaceRef>> {
+        let result = self.request("session.snapshot", json!({}), RetrySafety::Idempotent)?;
+        reduce_snapshot_scoped(&result, scope)
+    }
+
     pub fn notify(&mut self, title: &str, body: &str) -> Result<()> {
         self.request(
             "notification.show",
@@ -135,6 +144,15 @@ impl Herdr {
 /// so captured-response tests and any other direct callers cannot turn a
 /// changed or partial protocol shape into an ordinary empty session.
 pub fn reduce_snapshot(result: &Value) -> Result<Vec<WorkspaceRef>> {
+    reduce_snapshot_scoped(result, &RepositoryScope::default())
+}
+
+/// Reduces a snapshot while keeping an installed plugin's own checkout out of
+/// the repository candidates.
+pub fn reduce_snapshot_scoped(
+    result: &Value,
+    scope: &RepositoryScope,
+) -> Result<Vec<WorkspaceRef>> {
     let shape = validate_snapshot_result(result)?;
 
     let mut workspaces = Vec::new();
@@ -148,7 +166,7 @@ pub fn reduce_snapshot(result: &Value) -> Result<Vec<WorkspaceRef>> {
             .filter(|pane| text(pane, "workspace_id") == Some(workspace_id))
             .collect();
 
-        let paths = paths_of(workspace, &here);
+        let paths = paths_of(workspace_id, workspace, &here, scope);
         if paths.is_empty() {
             // Nowhere on disk to look. Not an error — there is simply nothing
             // for git to say about it.
@@ -237,35 +255,55 @@ fn available_value(value: Option<&Value>) -> String {
 }
 
 /// The directories a workspace occupies: its tracked checkout first, when it
-/// has one, then every distinct pane `cwd` in pane order.
+/// has one, then every distinct user pane `cwd` in pane order.
 ///
 /// `worktree` is present only for workspaces herdr itself opened as a repo or a
 /// worktree — in the live capture, five of ten workspaces sitting in ordinary
 /// git checkouts had no such key — so it is one source among two, never the
-/// filter.
-fn paths_of(workspace: &Value, panes: &[&Value]) -> Vec<PathBuf> {
+/// filter. For an installed invocation in such an untracked workspace, Crook's
+/// focused-pane/workspace cwd is inserted before the pane list: the plugin pane
+/// itself runs from the plugin root and is filtered below.
+fn paths_of(
+    workspace_id: &str,
+    workspace: &Value,
+    panes: &[&Value],
+    scope: &RepositoryScope,
+) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
     // Order is carried by the vector; membership by the set, so a workspace with
     // a great many panes stays linear rather than quadratic.
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut push = |paths: &mut Vec<PathBuf>, raw: &str| {
-        let path = tidy_path(raw);
+    let mut push = |paths: &mut Vec<PathBuf>, path: PathBuf| {
         if seen.insert(path.clone()) {
             paths.push(path);
         }
     };
 
-    if let Some(worktree) = workspace.get("worktree").filter(|w| w.is_object()) {
-        if let Some(checkout) = text(worktree, "checkout_path") {
-            push(&mut paths, checkout);
+    let tracked_checkout = workspace
+        .get("worktree")
+        .filter(|worktree| worktree.is_object())
+        .and_then(|worktree| text(worktree, "checkout_path"));
+    if let Some(checkout) = tracked_checkout {
+        push(&mut paths, tidy_path(checkout));
+    } else if scope.workspace_id() == Some(workspace_id) {
+        if let Some(cwd) = scope
+            .invocation_cwd()
+            .filter(|cwd| !scope.is_plugin_path(cwd))
+        {
+            push(&mut paths, tidy_path(&cwd.to_string_lossy()));
         }
     }
+
     for pane in panes {
         // `cwd`, never `foreground_cwd`: the latter follows the foreground
         // process and was observed pointing at a pyright install for a pane
         // whose real cwd was a repository.
         if let Some(cwd) = text(pane, "cwd") {
-            push(&mut paths, cwd);
+            let path = tidy_path(cwd);
+            if scope.is_plugin_path(&path) {
+                continue;
+            }
+            push(&mut paths, path);
         }
     }
     paths
