@@ -105,6 +105,12 @@ impl ScopedEnv {
         std::env::set_var(key, value);
         Self { key, previous }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for ScopedEnv {
@@ -638,6 +644,20 @@ fn installed_0_8_2_context_excludes_the_plugin_checkout_but_keeps_user_repositor
         vec![PathBuf::from("/home/dev/code/workspace-fallback")],
         "workspace_cwd is the fallback when focused_pane_cwd is absent"
     );
+
+    let mut plugin_focused = fixture["plugin_context"].clone();
+    plugin_focused["focused_pane_cwd"] = json!(plugin_root);
+    std::env::set_var("HERDR_PLUGIN_CONTEXT_JSON", plugin_focused.to_string());
+    let plugin_focused_config =
+        standup::config::load_with_args(&[]).expect("plugin focused pane fallback");
+    let plugin_focused_workspaces =
+        reduce_snapshot_scoped(&fixture["result"], plugin_focused_config.repository_scope())
+            .expect("snapshot");
+    assert_eq!(
+        workspace(&plugin_focused_workspaces, "w-user").paths,
+        vec![PathBuf::from("/home/dev/code/workspace-fallback")],
+        "a focused plugin pane must fall back to the genuine workspace cwd"
+    );
 }
 
 #[test]
@@ -668,6 +688,30 @@ fn malformed_plugin_context_fails_before_repository_discovery() {
             .to_string()
             .contains("HERDR_PLUGIN_CONTEXT_JSON contains malformed JSON"),
         "the environment variable and parse failure must be clear: {error}"
+    );
+}
+
+#[test]
+fn plugin_root_without_plugin_context_never_falls_back_to_process_cwd() {
+    let _guard = env_lock();
+    let _context = ScopedEnv::remove("HERDR_PLUGIN_CONTEXT_JSON");
+    let _root = ScopedEnv::set(
+        "HERDR_PLUGIN_ROOT",
+        "/home/dev/.local/share/herdr/plugins/moneycaringcoder.standup/0.2.0",
+    );
+
+    let error = standup::config::load_with_args(&[])
+        .expect_err("a partial installed-plugin environment must fail");
+
+    let message = error.to_string();
+    assert!(message.contains("HERDR_PLUGIN_ROOT is set"), "{message}");
+    assert!(
+        message.contains("HERDR_PLUGIN_CONTEXT_JSON is absent"),
+        "{message}"
+    );
+    assert!(
+        message.contains("refusing to use the installed plugin checkout"),
+        "{message}"
     );
 }
 

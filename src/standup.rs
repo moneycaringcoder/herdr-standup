@@ -61,7 +61,11 @@ pub fn build(config: &Config) -> Result<Digest> {
         }
     }
     if !config.offline {
-        if let Some(cwd) = config.repository_scope().invocation_cwd() {
+        if let Some(cwd) = config
+            .repository_scope()
+            .invocation_cwd()
+            .filter(|cwd| !config.repository_scope().is_plugin_path(cwd))
+        {
             push_unique(&mut candidates, cwd.to_path_buf());
         }
     }

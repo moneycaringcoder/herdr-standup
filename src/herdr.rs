@@ -286,7 +286,10 @@ fn paths_of(
     if let Some(checkout) = tracked_checkout {
         push(&mut paths, tidy_path(checkout));
     } else if scope.workspace_id() == Some(workspace_id) {
-        if let Some(cwd) = scope.invocation_cwd() {
+        if let Some(cwd) = scope
+            .invocation_cwd()
+            .filter(|cwd| !scope.is_plugin_path(cwd))
+        {
             push(&mut paths, tidy_path(&cwd.to_string_lossy()));
         }
     }
@@ -297,10 +300,7 @@ fn paths_of(
         // whose real cwd was a repository.
         if let Some(cwd) = text(pane, "cwd") {
             let path = tidy_path(cwd);
-            if scope
-                .plugin_root()
-                .is_some_and(|plugin_root| path.starts_with(plugin_root))
-            {
+            if scope.is_plugin_path(&path) {
                 continue;
             }
             push(&mut paths, path);

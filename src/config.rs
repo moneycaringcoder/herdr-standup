@@ -350,7 +350,18 @@ pub struct RepositoryScope {
 
 impl RepositoryScope {
     fn resolve() -> Result<Self> {
-        let Some(context) = PluginContext::resolve()? else {
+        let environment = PluginEnv::resolve(PLUGIN_ID);
+        let plugin_root = environment.plugin_root().map(PathBuf::from);
+        let context = PluginContext::resolve()?;
+        let Some(context) = context else {
+            if let Some(plugin_root) = &plugin_root {
+                return Err(format!(
+                    "HERDR_PLUGIN_ROOT is set to `{}` but HERDR_PLUGIN_CONTEXT_JSON is absent; \
+                     refusing to use the installed plugin checkout as a repository",
+                    plugin_root.display()
+                )
+                .into());
+            }
             let cwd = std::env::current_dir()
                 .map_err(|err| format!("could not resolve the current directory: {err}"))?;
             return Ok(Self {
@@ -360,14 +371,19 @@ impl RepositoryScope {
             });
         };
 
-        let environment = PluginEnv::resolve(PLUGIN_ID);
+        let invocation_cwd = [context.focused_pane_cwd(), context.workspace_cwd()]
+            .into_iter()
+            .flatten()
+            .find(|cwd| {
+                !plugin_root
+                    .as_deref()
+                    .is_some_and(|root| cwd.starts_with(root))
+            })
+            .map(PathBuf::from);
         Ok(Self {
             workspace_id: context.workspace_id().map(str::to_owned),
-            invocation_cwd: context
-                .focused_pane_cwd()
-                .or_else(|| context.workspace_cwd())
-                .map(PathBuf::from),
-            plugin_root: environment.plugin_root().map(PathBuf::from),
+            invocation_cwd,
+            plugin_root,
         })
     }
 
@@ -381,6 +397,11 @@ impl RepositoryScope {
 
     pub fn plugin_root(&self) -> Option<&Path> {
         self.plugin_root.as_deref()
+    }
+
+    pub fn is_plugin_path(&self, path: &Path) -> bool {
+        self.plugin_root()
+            .is_some_and(|plugin_root| path.starts_with(plugin_root))
     }
 }
 
