@@ -95,7 +95,7 @@ jobs:
       - name: Cache the pinned git
         if: matrix.git == 'build'
         id: pinned-git
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/pinned-git
           key: pinned-git-${{ matrix.gitVersion }}-${{ matrix.os }}
